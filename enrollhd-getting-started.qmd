@@ -1,0 +1,823 @@
+---
+title: "Getting started with Enroll-HD data"
+subtitle: "A tutorial for statisticians, in R and the tidyverse"
+author: "Abhishek"
+date: today
+format:
+  revealjs:
+    theme: [simple, custom.scss]
+    slide-number: true
+    code-line-numbers: false
+    code-overflow: wrap
+    footer: "Enroll-HD for statisticians"
+    width: 1280
+    height: 720
+    fig-width: 8
+    fig-height: 4
+    fig-dpi: 150
+    toc: false
+    embed-resources: true
+execute:
+  echo: true
+  warning: false
+  message: false
+---
+
+```{r}
+#| label: setup
+#| include: false
+library(tidyverse)
+library(gt)
+library(scales)
+source(here::here("R", "make_toy_pds.R"))
+theme_set(theme_minimal(base_size = 14))
+pds <- make_toy_pds()
+```
+
+## What this deck is for
+
+::: {.incremental}
+- You are a statistician who has just been given (or is about to request) an Enroll-HD periodic dataset.
+- In the next hour you will learn **what the disease and the study are**, **how the files fit together**, **the conventions that bite**, and **how to start an analysis in tidy R**.
+- Every code chunk runs on tiny illustrative tables built in `R/make_toy_pds.R`. No participant data are used or shown.
+- Sources: the Enroll-HD documentation set and the *Analyzing Data* articles at enroll-hd.org. Links are on the last slide.
+:::
+
+## Agenda
+
+1. Huntington's disease in five minutes
+2. The Enroll-HD platform and its periodic datasets
+3. Anatomy of a PDS: files, keys, visits
+4. Loading and merging with the tidyverse
+5. De-identification conventions and missing values
+6. Disease definitions and derived scores
+7. Special characteristics of HD data
+8. Age, CAG and time in models
+9. Coded therapies and comorbidities
+10. Data quality and a pre-analysis checklist
+
+# 1. Huntington's disease in five minutes
+
+## The gene and the repeat
+
+::: columns
+::: {.column width="55%"}
+- Autosomal dominant, caused by a CAG repeat expansion in *HTT*.
+- The **larger allele** (`caghigh` in the data) is what matters:
+
+| CAG repeats | Meaning |
+|---|---|
+| 10 to 26 | normal |
+| 27 to 35 | intermediate allele |
+| 36 to 39 | reduced penetrance |
+| 40 and above | full penetrance |
+| above 60 | usually juvenile onset |
+
+- Modal expanded CAG in Enroll-HD is **42**; most carriers sit between 40 and 44. Modal non-expanded allele is **17**.
+:::
+::: {.column width="45%"}
+- Longer repeats mean earlier onset, but with wide variation at any given length.
+- Every participant is genotyped at a central research lab. The result is never returned to participants or sites; it is for research only.
+- "HDGEC" = HD gene expansion carrier (36+). Controls are family members without the expansion.
+:::
+:::
+
+## One disease, several clocks
+
+Onset is not one event. Different domains start at different times, and the data hold several onset variables.
+
+```{r}
+#| label: natural-history
+#| echo: false
+#| fig-height: 4.2
+# Approximate proportion-of-maximum trajectories for a CAG-42 cohort,
+# redrawn from the Enroll-HD "Special characteristics of HD data" article.
+natural_history <- tribble(
+  ~age, ~Chorea, ~`SDMT deficit`, ~`Total motor score`, ~`TFC retained`,
+   20,   0.00,    0.00,             0.00,                 1.00,
+   35,   0.03,    0.02,             0.01,                 0.99,
+   45,   0.14,    0.11,             0.04,                 0.96,
+   50,   0.28,    0.21,             0.08,                 0.92,
+   60,   0.60,    0.45,             0.25,                 0.75,
+   70,   0.88,    0.70,             0.57,                 0.43,
+   80,   1.00,    1.00,             1.00,                 0.00
+) |>
+  pivot_longer(-age, names_to = "measure", values_to = "proportion")
+
+milestones <- tribble(
+  ~age, ~label,
+   34,  "first change",
+   44,  "TFC < 13",
+   50,  "motor diagnosis\n(DCL = 4)",
+   59,  "stage 3",
+   69.5, "stage 4+"
+)
+
+ggplot(natural_history, aes(age, proportion, colour = measure)) +
+  geom_smooth(se = FALSE, method = "loess", span = 0.8, linewidth = 1.1) +
+  geom_vline(data = milestones, aes(xintercept = age), linetype = "dotted") +
+  geom_text(data = milestones, aes(x = age, y = 1.08, label = label),
+            size = 3, inherit.aes = FALSE) +
+  scale_y_continuous(labels = label_percent(), limits = c(0, 1.15),
+                     breaks = seq(0, 1, .25)) +
+  labs(x = "Age (years), CAG = 42", y = "Proportion of maximum",
+       colour = NULL,
+       caption = "Approximate, redrawn from enroll-hd.org (PDS4). Not for analysis.") +
+  theme(legend.position = "bottom")
+```
+
+## Two definitions of "manifest"
+
+::: columns
+::: {.column width="50%"}
+**Motor diagnosis** (the literature's "manifest")
+
+- Diagnostic Confidence Level `diagconf` = 4: motor signs are unequivocal signs of HD (99% confidence).
+- Derived from the UHDRS motor exam at each visit.
+- The **first visit** at which `diagconf` becomes 4 is the motor-onset date.
+:::
+::: {.column width="50%"}
+**Participant category** `hdcat`
+
+| code | category |
+|---|---|
+| 2 | premanifest / premotor-manifest |
+| 3 | manifest / motor-manifest |
+| 4 | genotype negative |
+| 5 | family control |
+
+- Clinician judgement on **any** domain (motor, cognitive, behavioural). Some manifest participants have DCL below 4.
+- Codes 1 (unknown) and 6 (community control) never appear in a PDS.
+:::
+:::
+
+## CAP: putting age and CAG on one scale
+
+The CAG-Age Product summarises cumulative exposure to mutant huntingtin, like pack-years for smoking.
+
+$$\text{CAP} = \text{age} \times \frac{\text{CAG} - 30}{6.49}$$
+
+- Standardised so that **CAP = 100 at the expected age of motor diagnosis** (Warner et al. 2020). This is the `capscore` column in the PDS, computed at every visit for CAG 36 and above.
+- Older variants exist: Zhang 2011 uses age × (CAG − 33.66) with stages early < 290, mid 290 to 367, late > 367. Say which one you use.
+- CAP is undefined for people without the expansion. Do not compute it for controls.
+- Enroll-HD quartile cut points for CAG 40+ (PDS4): 88 and 119, giving groups below 88, 88 to 119, above 119.
+
+```{r}
+#| label: cap-fn
+cap_score <- function(age, cag) {
+  # Warner et al. (2020) standardisation; NA for non-expanded alleles
+  if_else(cag >= 36, age * (cag - 30) / 6.49, NA_real_)
+}
+cap_score(age = c(45, 45, 60), cag = c(42, 17, 40))
+```
+
+# 2. The Enroll-HD platform
+
+## What Enroll-HD is
+
+- A global, prospective, observational cohort study **and** a clinical research platform, run by CHDI Foundation since July 2012.
+- All-comers: HD gene expansion carriers at any stage, plus genotype-negative relatives and family controls as comparators.
+- Roughly 24,000 participants recruited, about 160 to 190 sites in over 20 countries across Europe, North America, Latin America and Australasia.
+- **Annual in-person visits** with a mandatory core battery and optional extended assessments.
+- Predecessor European study **REGISTRY** (2004 to 2016, protocol versions R2 and R3) migrated into the database for consenting participants, so many Europeans have history before their Enroll-HD baseline.
+
+## What is measured at a visit
+
+::: columns
+::: {.column width="50%"}
+**Core (every visit)**
+
+- Demographics, HD clinical characteristics, medications, comorbidities, therapies
+- UHDRS motor and diagnostic confidence
+- UHDRS Total Functional Capacity, Functional Assessment, Independence Scale
+- Cognitive: Symbol Digit Modalities, Stroop word / colour / interference, category fluency
+- Problem Behaviours Assessment short form (PBA-s)
+- Biosamples (CAG at baseline)
+:::
+::: {.column width="50%"}
+**Extended and optional**
+
+- Letter fluency, Trail Making A and B, MMSE
+- HADS-SIS (anxiety, depression, irritability)
+- Columbia Suicide Severity Rating Scale
+- SF-12 health survey, WPAI work productivity
+- Physiotherapy: timed up-and-go, chair stand
+- Caregiver quality of life, service receipt inventory
+- Reportable events: suicide attempt, suicide, mental-health hospitalisation, death
+:::
+:::
+
+## Periodic datasets (PDS)
+
+- Time-stamped cuts of the whole database, released every one to two years. PDS7 (2025) holds about **30,500 participants** and **130,000 visits**.
+- Everyone in a PDS has a monitored baseline; most have follow-ups. Enrolment more than 15 months before the cut requires a further reviewed contact, so single-visit participants are mostly recent enrolments.
+- Access: verify your institution, sign the data use agreement, post a short project description. Access is free and takes days, not months.
+- **Specified datasets (SPS)** can be requested for variables suppressed from the PDS (site, dates, item-level questionnaires, family history), after scientific review.
+- Public tier versus "available upon SRC approval" tier: the data dictionary tells you which.
+
+## The documentation you should read first
+
+| Document | Why it matters |
+|---|---|
+| Data dictionary (xlsx) | Every variable: file, form, type, code list, transformation, availability tier. The single source of truth |
+| Explore Dataset Structure | Entity-relationship diagram, keys, visit ordering |
+| Understand and Interpret Data | HD category rules, missing codes, date handling, score calculations, HD-ISS |
+| Coding Systems | Drug, indication and comorbidity code formats |
+| PDS overview | Sample sizes, distributions, completeness by form |
+| Study protocol, annotated CRFs, data-collection guidelines | What was asked, in what order, with what skip logic |
+| Unusual findings | Verified-correct oddities you will otherwise chase as bugs |
+
+# 3. Anatomy of a PDS
+
+## Eleven files, three grains
+
+```{r}
+#| label: files-table
+#| echo: false
+tribble(
+  ~File, ~Grain, ~Key, ~Content,
+  "profile",       "participant",          "subjid",                 "demographics, HD clinical characteristics, CAG, mortality",
+  "pharmacotx",    "participant, repeating","subjid + row",          "medications with start/stop days, codes, ATC",
+  "nutsuppl",      "participant, repeating","subjid + row",          "nutritional supplements",
+  "nonpharmacotx", "participant, repeating","subjid + row",          "physiotherapy, speech therapy, counselling ...",
+  "comorbid",      "participant, repeating","subjid + row",          "conditions (ICD-10) and procedures",
+  "participation", "participant x study",  "subjid + studyid",       "status, category at entry and latest, visit list, end of study",
+  "assessment",    "visit",                "subjid + studyid + seq", "1/blank flag per form completed at the visit",
+  "event",         "reportable event",     "subjid + studyid + seq", "suicide attempt, suicide, hospitalisation, death",
+  "enroll",        "Enroll-HD visit",      "subjid + studyid + seq", "all Enroll-HD visit forms and scores",
+  "registry",      "REGISTRY visit",       "subjid + studyid + seq", "REGISTRY 2 and 3 visit forms",
+  "adhoc",         "retrospective visit",  "subjid + studyid + seq", "UHDRS, cognitive and MMSE collected before REGISTRY"
+) |>
+  gt() |>
+  tab_options(table.font.size = px(18)) |>
+  tab_style(style = cell_text(weight = "bold"), locations = cells_column_labels())
+```
+
+## Studies and visits inside one PDS
+
+::: columns
+::: {.column width="50%"}
+`studyid`
+
+| code | study | when |
+|---|---|---|
+| ENR | Enroll-HD | mandatory, `visdy` from 0 |
+| R3 | REGISTRY v3 | before ENR, negative `visdy` |
+| R2 | REGISTRY v2 | before R3 |
+| RET | Ad hoc / retrospective | before everything |
+:::
+::: {.column width="50%"}
+`visit`
+
+- Baseline, Follow Up, Unscheduled, Phone Contact, Retro Visit
+- `seq` = 1 at baseline, then chronological, **including** unscheduled visits and phone contacts
+- Phone contacts carry only the Missed Visit form; unscheduled visits carry the core battery but not MMSE, SF-12, HADS or WPAI
+- `visdy` = days since the **Enroll-HD** baseline, for every study
+:::
+:::
+
+## The keys in one picture
+
+```{r}
+#| label: erd
+#| echo: false
+#| fig-height: 4.5
+nodes <- tribble(
+  ~file, ~x, ~y, ~grain,
+  "profile",        1.0, 3.0, "participant",
+  "pharmacotx",     0.4, 2.0, "participant, repeating",
+  "comorbid",       0.4, 1.5, "participant, repeating",
+  "nutsuppl",       0.4, 1.0, "participant, repeating",
+  "nonpharmacotx",  0.4, 0.5, "participant, repeating",
+  "participation",  3.6, 3.0, "participant x study",
+  "event",          3.6, 1.0, "event",
+  "enroll",         6.0, 3.7, "visit",
+  "registry",       6.0, 2.6, "visit",
+  "adhoc",          6.0, 1.5, "visit",
+  "assessment",     8.0, 2.6, "visit"
+)
+edges <- tribble(
+  ~from, ~to, ~label,
+  "profile", "participation", "subjid",
+  "participation", "enroll", "subjid + studyid",
+  "participation", "registry", "subjid + studyid",
+  "participation", "adhoc", "subjid + studyid",
+  "enroll", "assessment", "subjid + studyid + seq",
+  "registry", "assessment", "",
+  "adhoc", "assessment", ""
+) |>
+  left_join(nodes |> select(from = file, x0 = x, y0 = y), by = "from") |>
+  left_join(nodes |> select(to = file, x1 = x, y1 = y), by = "to")
+
+ggplot() +
+  geom_segment(data = edges, aes(x = x0, y = y0, xend = x1, yend = y1),
+               colour = "grey60") +
+  geom_label(data = nodes, aes(x, y, label = file, fill = grain),
+             size = 4.2, label.padding = unit(0.4, "lines")) +
+  geom_text(data = edges |> filter(label != ""),
+            aes((x0 + x1) / 2, (y0 + y1) / 2 + 0.18, label = label),
+            size = 3, colour = "grey30") +
+  scale_fill_brewer(palette = "Pastel1", name = NULL) +
+  scale_x_continuous(expand = expansion(mult = 0.12)) +
+  coord_cartesian(clip = "off") +
+  theme_void() +
+  theme(legend.position = "bottom")
+```
+
+# 4. Loading and merging
+
+## Read everything as text first
+
+The PDS ships as delimited text, one file per table, blank for missing. Aggregated cells such as `">70"` and `"<18"` sit inside otherwise numeric columns, so **read as character and convert deliberately**.
+
+```{r}
+#| label: read-pattern
+#| eval: false
+pds_dir <- here::here("data", "pds7")
+
+read_pds <- function(name) {
+  read_delim(
+    file.path(pds_dir, paste0(name, ".csv")),
+    delim = ",",                 # check: some releases are tab-delimited
+    col_types = cols(.default = col_character()),
+    na = c("", "NA"),
+    show_col_types = FALSE
+  )
+}
+
+pds <- c("profile", "participation", "enroll", "registry",
+         "adhoc", "assessment", "event", "pharmacotx",
+         "nutsuppl", "nonpharmacotx", "comorbid") |>
+  set_names() |>
+  map(read_pds)
+```
+
+For the rest of this deck `pds` is the toy list from `make_toy_pds()`, already typed.
+
+## Participant tables and visit tables
+
+```{r}
+#| label: peek
+pds$profile |> select(subjid, sex, caghigh, caglow, hddiagn)
+pds$enroll |> select(subjid, seq, visit, visdy, age, hdcat, motscore, diagconf) |> head(6)
+```
+
+## Merging participant data onto visits
+
+The join keys are `subjid` for participant tables and `subjid + studyid + seq` (or `subjid + visdy`) for visit tables. Say which grain the result has.
+
+```{r}
+#| label: merge
+carriers <- pds$profile |>
+  mutate(cag = parse_number(caghigh)) |>      # ">70" becomes 70; see next section
+  filter(cag >= 36)
+
+visits <- pds$enroll |>
+  inner_join(carriers |> select(subjid, sex, cag), by = "subjid") |>
+  left_join(pds$participation |> select(subjid, studyid, hdcat_0, age_0),
+            by = c("subjid", "studyid")) |>
+  mutate(years_in_study = visdy / 365.25)
+
+visits |> select(subjid, seq, years_in_study, sex, cag, hdcat_0, motscore) |> head(5)
+```
+
+## The "last visit" and "first visit" patterns
+
+```{r}
+#| label: last-visit
+last_visit <- pds$enroll |>
+  group_by(subjid, studyid) |>
+  slice_max(seq, n = 1, with_ties = FALSE) |>
+  ungroup()
+
+baseline <- pds$enroll |>
+  filter(visit == "Baseline")          # equivalently seq == 1 and visdy == 0
+
+bind_rows(baseline = baseline, latest = last_visit, .id = "which") |>
+  count(which, hdcat)
+```
+
+Prefer `slice_max(seq)` over `filter(visdy == max(visdy))`: it is explicit about ties and reads as the intent.
+
+## participation is wide; make it long
+
+`participation` lists visits as `visit1 ... visit21` and `vis1dy ... vis21dy`. Reshape before you count.
+
+```{r}
+#| label: participation-long
+#| eval: false
+visit_list <- pds$participation |>
+  select(subjid, studyid, starts_with("visit"), matches("^vis\\d+dy$")) |>
+  pivot_longer(
+    cols = -c(subjid, studyid),
+    names_to = c(".value", "index"),
+    names_pattern = "(visit|vis)(\\d+)(?:dy)?"
+  ) |>
+  rename(visit_type = visit, visit_day = vis) |>
+  filter(!is.na(visit_type)) |>
+  mutate(index = as.integer(index), visit_day = as.integer(visit_day))
+```
+
+Visit types there are abbreviated: BL, FUP, PC (phone contact), U (unscheduled), R (ad hoc), E (premature end).
+
+# 5. De-identification conventions
+
+## No dates, only days and ages
+
+- Every date became a **day offset from the Enroll-HD baseline**: `visdy`, `cmstdy`, `cmendy`, `mhstdy`, `evtdy`, `rfendy`, ... Negative means before baseline.
+- Every date of birth became an **integer age**: `age_0`, `age` at each visit, `hddiagn`, `dssage`, parental onset ages.
+- Partial dates were completed before conversion: a missing day became the 15th, a missing month and day became 1 July. The completion flag is not released.
+
+::: callout-warning
+## Consequence
+Start and stop days of a medication or condition can be **equal or reversed**. A duration of zero or minus 14 days is an artefact, not an error. Do not "clean" it away; model durations with that in mind.
+:::
+
+## Aggregation: numbers that arrive as text
+
+| Column | Aggregated values |
+|---|---|
+| `age`, `age_0` | `"<18"`, `">90"` |
+| `caghigh` | `">70"` |
+| `caglow` | `">28"` |
+| `bmi_imp` | `"<16.7"`, `">43.7"` |
+| `sbh1n` (suicide attempts) | `">50"` |
+| `race` | collapsed to seven categories |
+
+```{r}
+#| label: parse-aggregated
+parse_aggregated <- function(x) {
+  # Keep the numeric part, and flag cells that were censored by aggregation
+  tibble(value = parse_number(x),
+         censored = case_when(str_starts(x, "<") ~ "below",
+                              str_starts(x, ">") ~ "above",
+                              TRUE ~ "exact"))
+}
+
+pds$profile |>
+  mutate(parse_aggregated(caghigh)) |>
+  select(subjid, caghigh, value, censored) |>
+  filter(censored != "exact")
+```
+
+## Two kinds of missing
+
+::: columns
+::: {.column width="50%"}
+**System-defined**: a blank cell (`NA`). A question that was skipped by design, a child of a "no" answer, or a total with a missing item.
+
+**User-defined**: a code inside the column.
+
+| numeric | text | meaning |
+|---|---|---|
+| 9996 | WRONG | value known to be wrong |
+| 9997 | NOTAPPL | not applicable |
+| 9998 | MISSING | refused or omitted |
+| 9999 | UNKNOWN | unknown to participant |
+:::
+::: {.column width="50%"}
+```{r}
+#| label: missing-codes
+missing_codes <- c(9996, 9997, 9998, 9999)
+
+pds$enroll |>
+  mutate(across(c(motscore, tfcscore, sdmt1),
+                ~ if_else(.x %in% missing_codes, NA, .x))) |>
+  summarise(across(c(motscore, tfcscore, sdmt1),
+                   ~ sum(is.na(.x))))
+```
+
+Do this **before** any arithmetic; 9998 in a mean is a silent disaster.
+:::
+:::
+
+## Other things you will notice
+
+- `subjid` is a one-way recoded ID, `R` plus nine digits. Stable within a release, **not** across releases.
+- Height and weight are withheld; `bmi_imp` uses baseline height at every visit and is blank under 18.
+- Site, country and exact dates are not in the public tier.
+- Genotype-unknown participants were reclassified using the research CAG; community controls were removed.
+- Comorbidities, therapies and events had `studyid` removed because they are study-independent.
+- Exact duplicate rows in medication and comorbidity files are **intentional** (re-recorded entries). Decide explicitly whether to `distinct()`.
+
+# 6. Disease definitions and derived scores
+
+## Scores you can recompute
+
+| Score | Definition | Range |
+|---|---|---|
+| `motscore` | sum of 31 UHDRS motor items; blank if any item missing, then `miscore` holds the partial sum | 0 to 124 |
+| `tfcscore` | occupation + finances + chores + ADL + care level | 0 to 13 |
+| `fascore` | count of 25 "yes" items; `fiscore` if incomplete | 0 to 25 |
+| `indepscl` | single item | 10 to 100, step 5 |
+| PBA-s domains | severity × frequency summed over items (depression 1 to 3, irritability 4 to 5, psychosis 9 to 10, apathy 6, executive 7 to 8) | |
+| `capscore` | age × (CAG − 30) / 6.49 | |
+
+```{r}
+#| label: shoulson
+shoulson_fahn_stage <- function(tfc) {
+  case_when(tfc >= 11 ~ 1L, tfc >= 7 ~ 2L, tfc >= 3 ~ 3L,
+            tfc >= 1 ~ 4L, tfc == 0 ~ 5L)
+}
+pds$enroll |> mutate(stage = shoulson_fahn_stage(tfcscore)) |> count(stage)
+```
+
+## Deriving motor onset within the study
+
+```{r}
+#| label: motor-onset
+motor_onset <- pds$enroll |>
+  group_by(subjid) |>
+  arrange(seq, .by_group = TRUE) |>
+  summarise(
+    dcl4_at_entry     = first(diagconf) == 4,
+    converted         = !dcl4_at_entry & any(diagconf == 4),
+    onset_visdy       = if_else(converted, visdy[which(diagconf == 4)[1]], NA_integer_),
+    last_visdy        = last(visdy),
+    .groups = "drop"
+  )
+motor_onset
+```
+
+- Participants already at DCL 4 at baseline have **no observable onset**; exclude them from time-to-onset analyses or use methods that handle left truncation.
+- The same pattern with `hdcat` (2 to 3) gives clinical onset in any domain.
+- `hddiagn` is the age the participant was **told**; it can lag onset by years or be missing even for manifest participants.
+
+## Check the category rules in your data
+
+Rules from the documentation, written as tests. Run them once on every new release.
+
+```{r}
+#| label: rule-checks
+category_checks <- pds$participation |>
+  left_join(pds$profile |> mutate(cag = parse_number(caghigh)) |>
+              select(subjid, cag), by = "subjid") |>
+  summarise(
+    controls_below_36   = all(cag <  36 | !hdcat_0 %in% c(4, 5)),
+    carriers_36_or_more = all(cag >= 36 | !hdcat_0 %in% c(2, 3)),
+    no_unknown_or_cc    = !any(hdcat_0 %in% c(1, 6)),
+    latest_not_earlier  = all(hdcat_l >= hdcat_0 | !hdcat_0 %in% c(2, 3))
+  )
+category_checks
+```
+
+# 7. Special characteristics of HD data
+
+## Floors and ceilings everywhere
+
+```{r}
+#| label: toy-cohort
+#| echo: false
+# A larger illustrative cohort for the distribution and modelling slides.
+# Shapes follow the documentation qualitatively; values are invented.
+set.seed(7)
+toy_cohort <- tibble(subjid = sprintf("R%09d", 1:400)) |>
+  mutate(
+    cag  = sample(38:50, n(), replace = TRUE,
+                  prob = c(1, 2, 6, 10, 12, 11, 9, 6, 4, 3, 2, 1, 1)),
+    age  = round(runif(n(), 22, 70)),
+    cap  = cap_score(age, cag),
+    manifest = rbinom(n(), 1, plogis((cap - 100) / 12)) == 1,
+    motscore = if_else(manifest,
+                       rnbinom(n(), mu = pmax(5, (cap - 70) * 0.9), size = 3),
+                       rnbinom(n(), mu = 1.5, size = 0.6)) |>
+      pmin(124),                                  # the UHDRS motor maximum
+    tfcscore = if_else(manifest,
+                       pmin(13, pmax(0, round(13 - (cap - 90) / 8 + rnorm(n(), 0, 1.5)))),
+                       pmin(13, round(13 - rexp(n(), 3)))),
+    education_years = round(rnorm(n(), 13, 3))
+  )
+```
+
+```{r}
+#| label: floor-ceiling
+#| echo: false
+#| fig-height: 3.8
+toy_cohort |>
+  select(subjid, manifest, motscore, tfcscore) |>
+  pivot_longer(c(motscore, tfcscore), names_to = "score") |>
+  mutate(group = if_else(manifest, "manifest", "premanifest")) |>
+  ggplot(aes(value, fill = group)) +
+  geom_histogram(bins = 30, position = "identity", alpha = 0.6) +
+  facet_wrap(~ score, scales = "free") +
+  labs(x = NULL, y = "visits", fill = NULL,
+       caption = "Illustrative data. Real distributions are in the PDS overview and enroll-hd.org.") +
+  theme(legend.position = "bottom")
+```
+
+- Total motor score piles up at **0** (about a quarter of baseline HDGEC visits in the lowest CAP quartile) and is right-skewed to 124.
+- TFC, FAS and the Independence Scale pile up at their **maximum** for early participants.
+- Consequence: means and t-tests mislead. Consider transformations, zero-inflated or negative-binomial models for TMS, ordinal or beta-type models for TFC, or model change rather than level.
+
+## Behaviour behaves differently
+
+- PBA-s domains (depression, irritability, psychosis, apathy, executive) track disease stage **weakly**; apathy is the exception and rises with progression.
+- Behavioural items are informant-dependent: the "worst" ratings are blank at the Enroll-HD baseline, and several items are 9 (not assessable) when the participant came alone.
+- Suicidal ideation on PBA-s should agree with the C-SSRS rows and the event file. Check it.
+
+## Selection and follow-up
+
+- Cohort skews toward higher socioeconomic status and better health; ethnic diversity is limited (about 92% Caucasian).
+- Retention: about **80%** of premanifest and **55%** of manifest carriers remain at 7 years (withdrawal, death, loss to follow-up).
+- Visits are annual in intent: median gap **374 days**, but skewed, with gaps up to 6.8 years. People skip years and return, or pause during clinical trials.
+
+```{r}
+#| label: visit-gaps
+pds$enroll |>
+  group_by(subjid) |>
+  arrange(seq, .by_group = TRUE) |>
+  mutate(gap_days = visdy - lag(visdy)) |>
+  ungroup() |>
+  summarise(n_gaps = sum(!is.na(gap_days)),
+            median_gap = median(gap_days, na.rm = TRUE),
+            longest_gap = max(gap_days, na.rm = TRUE))
+```
+
+# 8. Age, CAG and time in models
+
+## Cross-sectional: index progression with CAP
+
+At study entry, disease burden differs by age **and** CAG. Enter both, or their product.
+
+```{r}
+#| label: cross-sectional
+#| eval: false
+baseline_carriers <- pds$enroll |>
+  filter(visit == "Baseline") |>
+  inner_join(pds$profile |> mutate(cag = parse_number(caghigh)) |>
+               filter(cag >= 40), by = "subjid") |>
+  mutate(age = parse_number(age), cap = cap_score(age, cag))
+
+fit_cap <- lm(sdmt1 ~ cap + sex + education_years, data = baseline_carriers)
+broom::tidy(fit_cap, conf.int = TRUE)
+```
+
+- Education matters for cognitive outcomes; sex interactions matter in some contexts.
+- CAP groups (below 88, 88 to 119, above 119) are a defensible early/mid/late split for CAG 40+.
+- Beware confounding by CAG: in Enroll-HD, participants with a history of drug use have milder motor signs **only because they have shorter CAG expansions**.
+
+## Longitudinal: use time since entry, not age, as the clock
+
+```{r}
+#| label: lmm
+#| eval: false
+library(lme4)
+
+carrier_visits <- visits |>
+  filter(cag >= 40) |>
+  mutate(cap_group = cut(cap_score(parse_number(age_0), cag),
+                         breaks = c(-Inf, 88, 119, Inf),
+                         labels = c("early", "mid", "late")))
+
+fit_slopes <- lmer(
+  motscore ~ years_in_study * cap_group + sex + (1 + years_in_study | subjid),
+  data = carrier_visits
+)
+broom.mixed::tidy(fit_slopes, effects = "fixed", conf.int = TRUE)
+```
+
+- Time 0 = the baseline visit; CAP (or CAP group) carries progression **up to** entry. Within a CAP group, change over a few years is close to linear.
+- Over the whole adult lifespan trajectories are not linear; if age is the clock use splines or fractional polynomials.
+- Random slopes are the norm: people progress at different rates.
+
+## Time to a landmark: survival methods
+
+```{r}
+#| label: survival
+#| eval: false
+library(survival)
+
+onset_data <- motor_onset |>
+  filter(!dcl4_at_entry) |>
+  inner_join(pds$profile |> mutate(cag = parse_number(caghigh)), by = "subjid") |>
+  inner_join(pds$participation |> select(subjid, age_0), by = "subjid") |>
+  mutate(
+    time_years = coalesce(onset_visdy, last_visdy) / 365.25,
+    event      = as.integer(converted),
+    cap_entry  = cap_score(parse_number(age_0), cag)
+  )
+
+fit_cox <- coxph(Surv(time_years, event) ~ cap_entry + sex, data = onset_data)
+broom::tidy(fit_cox, exponentiate = TRUE, conf.int = TRUE)
+```
+
+- Exclude people who were already past the landmark at entry, and think about whether that exclusion biases you.
+- Joint longitudinal-survival models exist for using all visits; see Long and Mills (2018).
+
+## Signal, noise and clinical trials
+
+Enroll-HD is used to design trials. The quantity that matters is the outcome's **signal-to-noise ratio**: mean annual change divided by the within-person SD of annual change.
+
+- Example from the articles: TFC declines 1.2 points/year with within-person SD 0.8, so signal-to-noise is 1.5. A treatment halving the decline has effect size 0.75.
+- Sample size scales with the **square** of that ratio, and with the square of follow-up length.
+- Estimate signal and noise on the subset of participants that a trial would enrol, and on the first few years of follow-up only.
+- Baseline prognostic covariates (CAP, baseline score) reduce noise; **enrichment** selects those likely to progress during the trial.
+
+# 9. Coded therapies and comorbidities
+
+## Codes in the current PDS
+
+| What | Column | Format |
+|---|---|---|
+| Drug | `cmtrt__decod` | RX + 9 digits (internal); `cmtrt__modify` is the English term |
+| Active ingredients | `cmtrt__ing` | comma-separated |
+| ATC classes | `cmtrt__atc` | comma-separated ATC codes |
+| Indication | `cmindc__decod` | CX + 9 digits; `cmindc__modify` English |
+| Comorbidity | `mhterm__decod` | ICD-10 (2014) |
+| Procedure | `mhterm__decod` | CX + 9 digits |
+| Ongoing | `cmenrf`, `mhenrf` | 1 if and only if the stop day is blank |
+
+Older releases used WHO Drug Dictionary and MedDRA codes; the format changed, the logic did not.
+
+## Filter by therapeutic class, not by name
+
+```{r}
+#| label: atc-filter
+on_antidepressant <- pds$pharmacotx |>
+  mutate(atc_codes = str_split(cmtrt__atc, ",\\s*")) |>
+  filter(map_lgl(atc_codes, ~ any(str_starts(.x, "N06A")))) |>
+  mutate(ongoing = cmenrf == 1,
+         duration_days = cmendy - cmstdy) |>
+  select(subjid, cmtrt__modify, cmtrt__atc, cmstdy, cmendy, ongoing, duration_days)
+on_antidepressant
+```
+
+Note `R000000002`: an exact duplicate row and a zero-day duration from partial-date imputation. Both are real-data features.
+
+## Comorbidities and ICD-10 chapters
+
+```{r}
+#| label: icd-filter
+#| eval: false
+depression_history <- pds$comorbid |>
+  filter(str_starts(mhterm__decod, "F32|F33")) |>
+  distinct(subjid) |>
+  mutate(depression_ever = TRUE)
+
+pds$profile |>
+  left_join(depression_history, by = "subjid") |>
+  mutate(depression_ever = coalesce(depression_ever, FALSE)) |>
+  count(depression_ever)
+```
+
+- ICD-10 is hierarchical: `str_starts` on the chapter or block prefix gives you the family of codes.
+- `mhbodsys` gives a coarse body-system code (1 to 17) when you just need organ systems.
+- Comorbidity and therapy rows are participant-level, not visit-level: align them to visits with `cmstdy`/`cmendy` and `visdy`.
+
+# 10. Data quality and a pre-analysis checklist
+
+## Quality you get, and quality you must add
+
+**Provided**: EDC edit checks and auto-computed totals, remote and on-site monitoring, central statistical monitoring, central coding, a published list of unusual but verified findings.
+
+**Yours to do**:
+
+- Recode 9996 to 9999 to `NA` before any arithmetic.
+- Parse aggregated text columns explicitly and keep the censoring flag.
+- Recompute totals from items where items are available and compare.
+- Confirm one baseline per participant at `visdy` 0 and `seq` 1, increasing `visdy`, and that `visitnum` equals the number of visit rows.
+- Look for known oddities before calling them bugs: pack-years of 2005, parental onset age 0, zero-length prescriptions.
+- Decide and document how to treat duplicates, unscheduled visits and phone contacts.
+
+## A tidy project for Enroll-HD analyses
+
+```
+my-enrollhd-analysis/
+  my-enrollhd-analysis.Rproj
+  renv.lock                 # frozen package versions
+  data/                     # the PDS extract, git-ignored, never copied around
+  R/
+    read_pds.R              # one function per concern
+    recode_missing.R
+    derive_scores.R
+    build_analysis_set.R
+  analysis/
+    01_cohort.qmd           # one Quarto document per analysis question
+    02_progression.qmd
+  output/                   # figures and tables, regenerated, git-ignored
+  SAP.md                    # the statistical analysis plan, written first
+```
+
+- Functions take a tibble and return a tibble. Pipelines read top to bottom. Names say what, comments say why.
+- The analysis set is built by code from the raw PDS every time; no hand edits.
+
+## Before you begin (from the Enroll-HD statisticians)
+
+::: {.incremental}
+1. Write the research question and objectives down, then search the literature.
+2. Define the population of interest and how it is operationalised in PDS variables.
+3. Check feasibility: are there enough of those people, with enough visits?
+4. Write a statistical analysis plan: dataset and release, measures, cleaning and outlier rules, missing-data strategy, methods, covariates and modifiers (CAG × age, sex, education), multiplicity, reproducibility. Consider pre-registering it.
+5. Work with a statistician throughout, not only at the end.
+6. Cite the release version and the documentation you relied on.
+:::
+
+## Where to go next
+
+- Analyzing Data hub: <https://www.enroll-hd.org/for-researchers/analyzing-data/>
+  - Special characteristics of HD data; Age and CAG length in HD data analysis; Data handling and management tips; Benefits and challenges of observational data; Using observational data to inform clinical trial design; Enrichment in clinical trial recruitment; Before you begin.
+- Documentation hub (dictionary, protocol, CRFs, coding, overview): <https://www.enroll-hd.org/for-researchers/data-support-documentation/>
+- Tools: PDS Data Explorer, HD-ISS calculator, Atlas of HD phenotype (same site).
+- Key papers: Landwehrmeyer et al. 2017 (Enroll-HD design); Warner et al. 2020 (CAP); Long & Mills 2018 (joint models); Schobel et al. 2017 (cUHDRS); Langbehn et al. 2010 (CAG and onset); Tabrizi et al. 2013 (TRACK-HD).
+
+Questions, corrections and additions are welcome. Source, toy data and rendering instructions: <https://github.com/stat-absk/enrollhd-getting-started>.

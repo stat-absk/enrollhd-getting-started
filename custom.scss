@@ -1,0 +1,17 @@
+/*-- scss:defaults --*/
+$font-family-sans-serif: "Source Sans Pro", "Helvetica Neue", Helvetica, Arial, sans-serif;
+$presentation-font-size-root: 26px;
+$presentation-heading-font-weight: 600;
+$code-block-font-size: 0.62em;
+$link-color: #c45c00;
+
+/*-- scss:rules --*/
+.reveal table {
+  font-size: 0.7em;
+}
+.reveal .slides section .callout {
+  font-size: 0.85em;
+}
+.reveal pre code {
+  max-height: 520px;
+}

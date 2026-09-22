@@ -1,0 +1,17 @@
+# R
+.Rproj.user/
+.Rhistory
+.RData
+.Ruserdata
+
+# Quarto / knitr
+/.quarto/
+*_files/
+*_cache/
+/_freeze/
+
+# Rendered deck (published from the website repo)
+enrollhd-getting-started.html
+
+# macOS
+.DS_Store
