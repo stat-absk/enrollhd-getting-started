@@ -1,8 +1,10 @@
 ---
 title: "Getting started with Enroll-HD data"
-subtitle: "A tutorial for statisticians, in R and the tidyverse"
+subtitle: "A tutorial for statisticians, in R and the tidyverse<br><span class='disclaimer'>Built only from publicly available Enroll-HD documentation. No real participant data are used or shown; every table and figure is illustrative.</span>"
 author: "Abhishek"
 date: today
+title-slide-attributes:
+  data-notes: "Disclaimer: public sources only, no participant data."
 format:
   revealjs:
     theme: [simple, custom.scss]
@@ -33,6 +35,16 @@ source(here::here("R", "make_toy_pds.R"))
 theme_set(theme_minimal(base_size = 14))
 pds <- make_toy_pds()
 ```
+
+## Disclaimer {.disclaimer-slide}
+
+::: callout-important
+## Public information only, no real data
+- This deck is built **only from publicly available material**: the Enroll-HD documentation set published for researchers (protocol, data dictionary, annotated case report forms, data-collection guidelines, dataset overview and interpretation guides) and the *Analyzing Data* articles at enroll-hd.org.
+- **No Enroll-HD participant data are used, shown or summarised.** Every table printed by the code is a small **illustrative** dataset generated in `R/make_toy_pds.R`; every histogram or curve is either synthetic or an approximate redrawing of a figure already published on enroll-hd.org, and is labelled as such.
+- Numbers quoted in the text (cohort size, distributions, retention, cut points) are taken from those public documents and articles and are cited for orientation, not for analysis.
+- Nothing here replaces the official documentation or the data use agreement that governs access to a periodic dataset.
+:::
 
 ## What this deck is for
 
