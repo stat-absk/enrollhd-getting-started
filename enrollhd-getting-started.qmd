@@ -34,14 +34,15 @@ library(scales)
 source(here::here("R", "make_toy_pds.R"))
 theme_set(theme_minimal(base_size = 14))
 pds <- make_toy_pds()
+clr <- make_toy_hdclarity()
 ```
 
 ## Disclaimer {.disclaimer-slide}
 
 ::: callout-important
 ## Public information only, no real data
-- This deck is built **only from publicly available material**: the Enroll-HD documentation set published for researchers (protocol, data dictionary, annotated case report forms, data-collection guidelines, dataset overview and interpretation guides) and the *Analyzing Data* articles at enroll-hd.org.
-- **No Enroll-HD participant data are used, shown or summarised.** Every table printed by the code is a small **illustrative** dataset generated in `R/make_toy_pds.R`; every histogram or curve is either synthetic or an approximate redrawing of a figure already published on enroll-hd.org, and is labelled as such.
+- This deck is built **only from publicly available material**: the Enroll-HD documentation set published for researchers (protocol, data dictionary, annotated case report forms, data-collection guidelines, dataset overview and interpretation guides), the *Analyzing Data* articles at enroll-hd.org, and the public HDClarity documents (protocol, lab manual, PDS4 dictionary, dataset-structure guide, PDS overviews).
+- **No Enroll-HD or HDClarity participant data are used, shown or summarised.** Every table printed by the code is a small **illustrative** dataset generated in `R/make_toy_pds.R`; the simulated releases described in section 11 are synthetic too; every histogram or curve is either synthetic or an approximate redrawing of a figure already published on enroll-hd.org, and is labelled as such.
 - Numbers quoted in the text (cohort size, distributions, retention, cut points) are taken from those public documents and articles and are cited for orientation, not for analysis.
 - Nothing here replaces the official documentation or the data use agreement that governs access to a periodic dataset.
 :::
@@ -67,6 +68,7 @@ pds <- make_toy_pds()
 8. Age, CAG and time in models
 9. Coded therapies and comorbidities
 10. Data quality and a pre-analysis checklist
+11. HDClarity, and simulated releases for testing your code
 
 # 1. Huntington's disease in five minutes
 
@@ -824,11 +826,193 @@ my-enrollhd-analysis/
 6. Cite the release version and the documentation you relied on.
 :::
 
+# 11. HDClarity, and simulated releases for testing your code
+
+## What HDClarity is
+
+::: columns
+::: {.column width="55%"}
+- A longitudinal **CSF and blood collection study nested in Enroll-HD** (UCL sponsor, CHDI collaborator, NCT02855476), open since January 2017, aiming at about 2,500 participants.
+- Every HDClarity participant is an Enroll-HD participant with the **same `subjid`**; demographics, CAG, logs and the clinical scales come from the Enroll-HD visit.
+- PDS4 (data cut January 2026): **999 participants, 1,443 visit packages**, 38 sites in 9 countries; regions Europe, North America, Australasia.
+- Ages 18 to 75 (21 to 75 for manifest HD); the six recruited cohorts are balanced as far as possible, so the mix differs from Enroll-HD.
+:::
+::: {.column width="45%"}
+`hdcat` (HDClarity coding, protocol v4)
+
+| code | cohort | rule |
+|---|---|---|
+| 1 | early premanifest | DCL < 4, CAG >= 40, DBS < 250 |
+| 2 | late premanifest | DCL < 4, CAG >= 40, DBS >= 250 |
+| 3 | early HD | DCL 4, TFC 7 to 13 |
+| 4 | moderate HD | DCL 4, TFC 3 to 6 |
+| 5 | advanced HD | DCL 4, TFC 0 to 2 |
+| 6 | healthy control | CAG < 36 |
+| 8 | incomplete penetrance | CAG 36 to 39 |
+
+DBS = (CAG − 35.5) × age; `dbs` is in the visits file.
+:::
+:::
+
+## A visit package (one `cycle`)
+
+```{r}
+#| label: clr-package
+#| echo: false
+#| fig-width: 11
+#| fig-height: 3.1
+steps <- tribble(
+  ~x, ~when, ~label, ~detail, ~study,
+  1, "up to 90 days before", "Enroll-HD\nBaseline / Follow Up", "all Enroll-HD forms\n(60 days under protocol v3)", "Enroll-HD",
+  2, "day 0",                "Screening",                        "consent, enrolment, safety bloods;\nclinical scales only when no\nEnroll-HD visit is in the window", "HDClarity",
+  3, "0 to 30 days later",   "Sampling",                         "fasting, lumbar puncture\n(up to 20 mL CSF), up to 50 mL\nblood, motor exam repeated", "HDClarity",
+  4, "4 to 8 weeks later",   "RPT Sampling",                     "optional, about 14 % of packages\n(cycle 1 only under protocol v4)", "HDClarity"
+)
+ggplot(steps, aes(x, 1)) +
+  annotate("segment", x = 0.75, xend = 4.25, y = 1, yend = 1, colour = "grey70") +
+  geom_label(aes(label = label, fill = study), size = 4.2, label.padding = unit(0.45, "lines"), show.legend = FALSE) +
+  geom_text(aes(y = 1.3, label = when), size = 3.6, colour = "grey30", fontface = "bold") +
+  geom_text(aes(y = 0.62, label = detail), size = 3.1, colour = "grey30", lineheight = 0.9) +
+  scale_fill_manual(values = c("Enroll-HD" = "#fbb4ae", "HDClarity" = "#b3cde3")) +
+  coord_cartesian(ylim = c(0.4, 1.4), xlim = c(0.5, 4.5)) +
+  theme_void()
+```
+
+- Packages recur **annually** (plus or minus two months) as cycles 2, 3, 4; three missed samplings end participation.
+- A package is released **only if at least one CSF sample was collected** (about 98 % of punctures succeed). A dropped package leaves a **gap in `cycle`**.
+- Adverse events, phone contacts, end forms, kit ids and numeric lab results are not in the PDS (SRC or IDS tier).
+
+## Nine files, one new grain
+
+```{r}
+#| label: clr-files
+#| echo: false
+tribble(
+  ~File, ~Grain, ~Key, ~Content,
+  "profile",       "participant",             "subjid",                          "Enroll-HD demographics, HDCC, CAG, plus fhx, hdcsf, proteomic",
+  "participation", "participant x cycle",     "subjid + cycle",                  "age and hdcat at screening, status, day anchors, visit1..21, vis1dy..21, vis1smpl..21",
+  "visits",        "visit",                   "subjid + cycle + studyid + visit","every clinical form (Enroll-HD rows), motor at sampling, dbs, hdcat, CAP, HD-ISS, lab flags, csfpdy, csfpage, plsmsage",
+  "assessment",    "visit",                   "subjid + cycle + seq",            "1/blank per form present: enrollment, eligibility, safety labs, csf, csfquality, clinical forms",
+  "csfquality",    "sampling visit x row",    "subjid + cycle + visit + row",    "triplicate erythrocyte and leukocyte counts per uL with their flags",
+  "pharmacotx, nutsuppl, nonpharmacotx, comorbid", "participant, repeating", "subjid + row", "the Enroll-HD log forms, same columns as the Enroll-HD PDS"
+) |>
+  gt() |>
+  tab_options(table.font.size = px(17)) |>
+  tab_style(style = cell_text(weight = "bold"), locations = cells_column_labels())
+```
+
+Compared with the Enroll-HD PDS: no `enroll`, `registry`, `adhoc` or `event`; one `visits` file for both studies; `cycle` everywhere.
+
+## Keys and days differ from the Enroll-HD PDS
+
+- `visdy` counts days since the participant's **first HDClarity screening**, so the Enroll-HD row of cycle 1 is negative. It **cannot be aligned** with the Enroll-HD PDS `visdy`; the offset is an SRC-request variable.
+- `seq` numbers every visit of a participant chronologically **across cycles**; `visit` is Baseline or Follow Up (`studyid` ENR) and Screening, Sampling or RPT Sampling (`studyid` CLR).
+- `hdcat` is decided at screenings 1 and 5 and **carried forward** in between, so a premanifest participant can show DCL 4 at a later sampling (19 participants in PDS4). Rule checks must use the screening where it was set.
+- Safety bloods arrive as categorical flags (`wbcres1c` high/low, `lbres1` passed/failed, a second sample in the `2` columns); the numbers are not released.
+
+```{r}
+#| label: clr-peek
+clr$visits |>
+  filter(subjid == "R000000004") |>
+  select(cycle, seq, studyid, visit, visdy, hdcat, dbs, motscore, diagconf, csfpdy)
+```
+
+## Reading a package in R
+
+The participation arrays gain a samples column (`vis1smpl ...`). The suffix, not the stem, tells the three arrays apart, so capture it and pivot twice: long over every array cell, then wide by array.
+
+```{r}
+#| label: clr-arrays
+arrays <- clr$participation |>
+  pivot_longer(matches("^(visit|vis)\\d+"),
+               names_to = c("stem", "index", "suffix"),
+               names_pattern = "^(visit|vis)(\\d+)(dy|smpl)?$",
+               values_transform = as.character) |>
+  mutate(array = case_when(suffix == "smpl" ~ "samples", suffix == "dy" ~ "day", TRUE ~ "type")) |>
+  select(subjid, cycle, index, array, value) |>
+  pivot_wider(names_from = array, values_from = value) |>
+  filter(!is.na(type)) |>
+  mutate(index = as.integer(index), day = as.integer(day))
+arrays |> filter(subjid == "R000000001")
+```
+
+`type` uses the participation codes ENR/BL, ENR/FUP, SCR, BS and BS2; `samples` reads "CSF, Plasma, Serum" or, after a failed puncture, "Plasma, Serum".
+
+## CSF quality and the category rules as tests
+
+```{r}
+#| label: clr-csf-join
+clr$visits |>
+  filter(!is.na(csfpdy)) |>
+  left_join(clr$csfquality, by = c("subjid", "cycle", "studyid", "visit", "visdy")) |>
+  transmute(subjid, cycle, visit, visdy, ery = (erycnt1 + erycnt2 + erycnt3) / 3, eryflag, leukflag)
+```
+
+```{r}
+#| label: clr-rule-checks
+clr_checks <- clr$visits |>
+  filter(visit == "Screening", cycle %in% c(1, 5)) |>
+  left_join(clr$profile |> transmute(subjid, cag = parse_number(caghigh)), by = "subjid") |>
+  summarise(
+    controls_below_36 = all(cag < 36 | hdcat != 6),
+    ip_36_to_39       = all(between(cag, 36, 39) | hdcat != 8),
+    dbs_formula       = all(is.na(dbs) | abs(dbs - (cag - 35.5) * age) <= (cag - 35.5)),   # age is in whole years
+    premanifest_dbs   = all(!hdcat %in% c(1, 2) | (hdcat == 1) == (dbs < 250))
+  )
+clr_checks
+```
+
+## Simulated releases for testing your code before the data arrive
+
+Two tidyverse simulators live in the project this deck belongs to. Both are built **only from public documentation** and write synthetic files that say so in every folder.
+
+| | Enroll-HD PDS7 | HDClarity PDS4 |
+|---|---|---|
+| script | `Rscript run_simulation.R 30511` | `Rscript hdclarity/run_hdclarity.R` |
+| output | 11 files, 30,511 participants, 9 minutes | 9 files, 999 participants, 30 seconds |
+| nested | one latent disease clock per participant | drawn from a simulated Enroll-HD population, so scores agree across both |
+| calibrated to | PDS7 overview, statistical report, *Analyzing Data* figures | PDS4 and PDS3 overviews, structure guide, protocol, lab manual |
+| checks | 88 of 90 pass (CAP quartile and TMS median are known misses) | 73 of 73 pass |
+
+- Each release carries the dictionary column set and order, a `codebook.csv`, an `anomaly_log.csv` of the deliberate oddities, a `validation_report.md` and the disclaimer.
+- They reproduce the conventions from sections 3 to 5 and 9: recoded ids, day offsets, aggregated text, 9996 to 9999 codes, duplicate log rows, partial-date artefacts, the missing `cycle` and the carried `hdcat`.
+
+```{r}
+#| label: read-simulated
+#| eval: false
+sim <- readRDS(here::here("hdclarity", "output", "hdclarity_sim_999_20260923_20260923", "hdclarity_sim.rds"))
+sim$visits |> count(studyid, visit)
+```
+
+## What the simulators are for, and what they are not
+
+::: columns
+::: {.column width="50%"}
+**Use them to**
+
+- write and test `read_pds()`, joins, reshapes and derived scores before the extract arrives;
+- rehearse the rule checks of sections 6 and 11 so they run on day one;
+- size a pipeline: file sizes, run time, memory;
+- teach, as this deck does, without touching participant data.
+:::
+::: {.column width="50%"}
+**Do not use them to**
+
+- estimate anything about Huntington's disease: margins are matched, joint structure is one latent clock plus noise;
+- judge site or country effects (sites are not in the PDS, none are simulated);
+- study laboratory values (flags are independent draws; CSF cell-count shapes are assumed);
+- explore the SRC or IDS tiers, adverse events or proteomics (not generated).
+:::
+:::
+
+Every number in a simulated release is synthetic. Cite the real release and its documentation, never the simulator, in any result.
+
 ## Where to go next
 
 - Analyzing Data hub: <https://www.enroll-hd.org/for-researchers/analyzing-data/>
   - Special characteristics of HD data; Age and CAG length in HD data analysis; Data handling and management tips; Benefits and challenges of observational data; Using observational data to inform clinical trial design; Enrichment in clinical trial recruitment; Before you begin.
 - Documentation hub (dictionary, protocol, CRFs, coding, overview): <https://www.enroll-hd.org/for-researchers/data-support-documentation/>
+- HDClarity: <https://www.hdclarity.net/>; its protocol, lab manual, PDS4 dictionary, dataset-structure guide and overview are on the same Enroll-HD documentation hub.
 - Tools: PDS Data Explorer, HD-ISS calculator, Atlas of HD phenotype (same site).
 - Key papers: Landwehrmeyer et al. 2017 (Enroll-HD design); Warner et al. 2020 (CAP); Long & Mills 2018 (joint models); Schobel et al. 2017 (cUHDRS); Langbehn et al. 2010 (CAG and onset); Tabrizi et al. 2013 (TRACK-HD).
 

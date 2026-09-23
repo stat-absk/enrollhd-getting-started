@@ -1,7 +1,7 @@
 # Getting started with Enroll-HD data
 
 A tutorial slide deck for statisticians who are about to open an Enroll-HD periodic dataset
-(PDS) for the first time. Fifty reveal.js slides built with Quarto and R:
+(PDS) for the first time. Sixty reveal.js slides built with Quarto and R:
 
 1. Huntington's disease in five minutes: CAG, penetrance, onset, CAP
 2. The Enroll-HD platform and its periodic datasets
@@ -13,13 +13,15 @@ A tutorial slide deck for statisticians who are about to open an Enroll-HD perio
 8. Age, CAG and time in cross-sectional, longitudinal and survival models
 9. Coded therapies and comorbidities
 10. Data quality and a pre-analysis checklist
+11. HDClarity, the CSF and blood study nested in Enroll-HD, and simulated releases for testing code
 
 **View the slides:** <https://stat-absk.github.io/slides/enrollhd-getting-started.html>
 
 ## Disclaimer
 
 This deck is built **only from publicly available information**: the Enroll-HD documentation
-published for researchers and the *Analyzing Data* articles at enroll-hd.org. **No Enroll-HD
+published for researchers, the *Analyzing Data* articles at enroll-hd.org, and the public
+HDClarity documents (protocol, lab manual, PDS4 dictionary, dataset-structure guide, PDS overviews). **No Enroll-HD
 participant data are used, shown or summarised anywhere in the slides or in this repository.**
 All printed tables come from the illustrative generator described below; all plots are synthetic
 or approximate redrawings of figures already published on enroll-hd.org and are labelled as such.
@@ -33,7 +35,9 @@ They are shaped like the real PDS files (`profile`, `participation`, `enroll`, `
 reproduce the conventions that trip people up: recoded IDs, day offsets instead of dates,
 `seq` ordering, aggregated values arriving as text (`">70"`, `"<18"`), the 9996 to 9999 missing
 codes, a duplicate prescription row and a zero-day duration from partial-date imputation.
-Nothing in them is calibrated to real data.
+Nothing in them is calibrated to real data. `make_toy_hdclarity()` in the same file does the
+same for the HDClarity PDS: three participants, five visit packages, the negative-day source
+visit, the samples array, a failed lumbar puncture, a missing cycle and a carried `hdcat`.
 
 ## Rendering
 
