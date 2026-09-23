@@ -1,0 +1,132 @@
+/*-- scss:defaults --*/
+//
+// The site's signature as a reveal.js theme: the light appearance (ink on
+// paper) because a deck is projected, with the same faces, strengths, rule,
+// accent and grain as the pages. Canonical copy in the site repository;
+// each deck keeps an identical copy next to its .qmd. Deck-specific rules go
+// in the deck's own file, loaded after this one.
+//
+$ground:    #F2F3EA;   // the chalk, now the page
+$surface:   #E9EAE0;
+$surface2:  #DFE0D5;
+$writing:   #0E1412;   // the slate, now the ink
+$accent:    #6E5A16;   // yellow chalk pressed into paper, 6.0:1
+$chalk:     #E9D592;   // the chalk itself, for a tint that must stay light
+
+$ink:   rgba($writing, 0.92);
+$ink2:  rgba($writing, 0.80);
+$ink3:  rgba($writing, 0.70);
+$rule:  rgba($writing, 0.22);
+
+$font-family-serif: ui-serif, "New York", "Iowan Old Style", Palatino, Georgia, serif;
+$font-family-sans-serif: system-ui, -apple-system, "SF Pro Text", "Segoe UI", Roboto, sans-serif;
+$font-family-monospace: ui-monospace, "SF Mono", SFMono-Regular, Menlo, monospace;
+
+$body-bg: $ground;
+$body-color: $ink;
+$backgroundColor: $ground;
+$link-color: $accent;
+$link-color-hover: $accent;
+$selection-background-color: rgba($accent, 0.28);
+$selection-color: $writing;
+
+$presentation-font-size-root: 28px;
+$presentation-line-height: 1.5;
+$presentation-heading-font: $font-family-serif;
+$presentation-heading-color: $ink;
+$presentation-heading-font-weight: 400;
+$presentation-heading-letter-spacing: -0.014em;
+$presentation-h1-font-size: 2.1em;
+$presentation-h2-font-size: 1.5em;
+$presentation-h3-font-size: 1.1em;
+$presentation-block-margin: 14px;
+
+$code-color: $ink2;
+$code-block-bg: $surface;
+$code-block-border-color: $rule;
+$code-block-font-size: 0.6em;
+$code-block-theme: "a11y-light";
+
+/*-- scss:rules --*/
+.reveal {
+  font-variant-numeric: tabular-nums;
+  -webkit-font-smoothing: auto;
+
+  // Names in the serif at regular; the chalk rule opens a slide.
+  h1, h2, h3 { font-weight: 400; }
+  h2 { border-bottom: 1.5px solid $rule; padding-bottom: 0.22em; margin-bottom: 0.6em; }
+  h3 { font-family: $font-family-sans-serif; font-weight: 600; font-size: 1.05em; }
+
+  .title { font-family: $font-family-serif; font-weight: 400; letter-spacing: -0.022em; line-height: 1.06; }
+  .subtitle { color: $ink2; font-size: 1.05em; }
+  .quarto-title-authors, .quarto-title-author-name, .date { color: $ink3; font-size: 0.75em; }
+  .quarto-title-authors { margin-top: 1.2em; }
+
+  // In prose a link is a link without shouting: a faint accent underline.
+  a { text-decoration: underline; text-decoration-thickness: 1px; text-decoration-color: rgba($accent, 0.4);
+      text-underline-offset: 0.18em; }
+  a:hover { text-decoration-color: $accent; color: $accent; }
+
+  // Uppercase exists in one place, and it is tracked.
+  .eyebrow { text-transform: uppercase; letter-spacing: 0.08em; font-size: 0.5em; color: $ink3; }
+
+  // Tables: ruled, not boxed.
+  table { font-size: 0.7em; border-collapse: collapse; }
+  th { color: $ink2; font-weight: 600; text-align: left; border-bottom: 1.5px solid $rule; }
+  td { border-bottom: 1px solid rgba($writing, 0.10); }
+  table tbody tr:last-child td { border-bottom: 1px solid rgba($writing, 0.10); }
+
+  blockquote { border-left: 2px solid $accent; background: transparent; box-shadow: none;
+               padding: 0 0 0 0.7em; margin: 0.6em 0; color: $ink2; }
+
+  pre { box-shadow: none; }
+  pre code { max-height: 520px; border: 1px solid $rule; border-radius: 12px; }
+  code { color: $ink2; }
+  // A callout is a part: the accent marks its edge, the surface holds it, no
+  // icon. Quarto colours each kind (important is red) with selectors of its
+  // own, so these say so firmly.
+  div.callout, div.callout.callout-style-default, div[class*="callout-"].callout {
+    font-size: 0.85em; border: 1px solid $rule !important; border-left: 3px solid $accent !important;
+    background: $surface; border-radius: 12px; box-shadow: none;
+  }
+  // in a deck the title sits inside the body as .callout-title, not in a header
+  div.callout .callout-title, div.callout > .callout-header,
+  div[class*="callout-"].callout-style-default .callout-title {
+    background: $surface2 !important; color: $ink !important; font-weight: 600;
+    border-radius: 12px 12px 0 0;
+  }
+  .callout .callout-icon, .callout .callout-icon-container { display: none !important; }
+  .callout-body-container, .callout-body { color: $ink; }
+
+  // The furniture is quiet and the accent means "you are here".
+  .slide-number { font-family: $font-family-sans-serif; font-size: 13px; color: $ink3; background: transparent; }
+  .footer { font-size: 15px; color: $ink3;
+            a { color: $accent; text-decoration: none; } }
+  .progress { color: $accent; height: 3px; }
+  .controls { color: $accent; }
+  .slide-menu-button { color: $ink3; }
+  .quiet { color: $ink3; }
+  .accent { color: $accent; }
+
+  // A figure sits on the paper, not in a white box.
+  img, .quarto-figure img { background: transparent; }
+  .quarto-figure figcaption, figcaption, .caption { font-size: 0.55em; color: $ink3; text-align: left; }
+
+  ::selection { background: $selection-background-color; color: $writing; }
+}
+
+// The tooth of the paper: a whisper of grain over everything, as on the pages.
+body::after {
+  content: "";
+  position: fixed;
+  inset: 0;
+  z-index: 9999;
+  pointer-events: none;
+  opacity: 0.04;
+  background-image: url("data:image/svg+xml;base64,PHN2ZyB4bWxucz0naHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmcnIHdpZHRoPScyNDAnIGhlaWdodD0nMjQwJz48ZmlsdGVyIGlkPSduJz48ZmVUdXJidWxlbmNlIHR5cGU9J2ZyYWN0YWxOb2lzZScgYmFzZUZyZXF1ZW5jeT0nMC45JyBudW1PY3RhdmVzPScyJyBzdGl0Y2hUaWxlcz0nc3RpdGNoJy8+PC9maWx0ZXI+PHJlY3Qgd2lkdGg9JzEwMCUnIGhlaWdodD0nMTAwJScgZmlsdGVyPSd1cmwoI24pJy8+PC9zdmc+");
+  background-size: 240px 240px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .reveal .slides section { transition: none !important; }
+}

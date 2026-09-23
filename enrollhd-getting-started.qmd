@@ -7,7 +7,7 @@ title-slide-attributes:
   data-notes: "Disclaimer: public sources only, no participant data."
 format:
   revealjs:
-    theme: [simple, custom.scss]
+    theme: [default, signature-reveal.scss, custom.scss]
     slide-number: true
     code-line-numbers: false
     code-overflow: wrap
@@ -32,7 +32,14 @@ library(tidyverse)
 library(gt)
 library(scales)
 source(here::here("R", "make_toy_pds.R"))
-theme_set(theme_minimal(base_size = 14))
+# Figures sit on the paper, not in a white box: transparent devices and panels.
+knitr::opts_chunk$set(dev.args = list(bg = "transparent"))
+theme_set(theme_minimal(base_size = 14) +
+            theme(plot.background = element_rect(fill = "transparent", colour = NA),
+                  panel.background = element_rect(fill = "transparent", colour = NA),
+                  legend.background = element_rect(fill = "transparent", colour = NA)))
+paper <- "#F2F3EA"
+tints <- c("#E9D592", "#F1E8C5", "#DFE0D5", "#CBD3C4", "#E0E1D9")   # chalk and its neighbours
 pds <- make_toy_pds()
 clr <- make_toy_hdclarity()
 ```
@@ -263,7 +270,7 @@ tribble(
   "adhoc",         "retrospective visit",  "subjid + studyid + seq", "UHDRS, cognitive and MMSE collected before REGISTRY"
 ) |>
   gt() |>
-  tab_options(table.font.size = px(18)) |>
+  tab_options(table.font.size = px(18), table.background.color = paper) |>
   tab_style(style = cell_text(weight = "bold"), locations = cells_column_labels())
 ```
 
@@ -331,7 +338,8 @@ ggplot() +
   geom_text(data = edges |> filter(label != ""),
             aes((x0 + x1) / 2, (y0 + y1) / 2 + 0.18, label = label),
             size = 3, colour = "grey30") +
-  scale_fill_brewer(palette = "Pastel1", name = NULL) +
+  scale_fill_manual(values = unname(tints), name = NULL) +
+  guides(fill = guide_legend(override.aes = list(label = ""))) +
   scale_x_continuous(expand = expansion(mult = 0.12)) +
   coord_cartesian(clip = "off") +
   theme_void() +
@@ -873,7 +881,7 @@ ggplot(steps, aes(x, 1)) +
   geom_label(aes(label = label, fill = study), size = 4.2, label.padding = unit(0.45, "lines"), show.legend = FALSE) +
   geom_text(aes(y = 1.3, label = when), size = 3.6, colour = "grey30", fontface = "bold") +
   geom_text(aes(y = 0.62, label = detail), size = 3.1, colour = "grey30", lineheight = 0.9) +
-  scale_fill_manual(values = c("Enroll-HD" = "#fbb4ae", "HDClarity" = "#b3cde3")) +
+  scale_fill_manual(values = c("Enroll-HD" = "#DFE0D5", "HDClarity" = "#E9D592")) +
   coord_cartesian(ylim = c(0.4, 1.4), xlim = c(0.5, 4.5)) +
   theme_void()
 ```
@@ -897,7 +905,7 @@ tribble(
   "pharmacotx, nutsuppl, nonpharmacotx, comorbid", "participant, repeating", "subjid + row", "the Enroll-HD log forms, same columns as the Enroll-HD PDS"
 ) |>
   gt() |>
-  tab_options(table.font.size = px(17)) |>
+  tab_options(table.font.size = px(17), table.background.color = paper) |>
   tab_style(style = cell_text(weight = "bold"), locations = cells_column_labels())
 ```
 

@@ -47,7 +47,9 @@ quarto render enrollhd-getting-started.qmd
 
 Requires R with `tidyverse`, `gt`, `scales`, `here` and `knitr`. The modelling slides show code
 for `lme4`, `broom.mixed` and `survival` without executing it, so those packages are optional.
-The deck is rendered as a single self-contained HTML file.
+The deck is rendered as a single self-contained HTML file. Its look comes from
+`signature-reveal.scss`, the reveal.js form of the design system used across
+<https://stat-absk.github.io>, with `custom.scss` holding the few deck-specific rules.
 
 ## Sources
 
