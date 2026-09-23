@@ -544,7 +544,7 @@ shoulson_fahn_stage <- function(tfc) {
 pds$enroll |> mutate(stage = shoulson_fahn_stage(tfcscore)) |> count(stage)
 ```
 
-## Deriving motor onset within the study
+## Deriving motor onset within the study {.smaller}
 
 ```{r}
 #| label: motor-onset
@@ -911,7 +911,7 @@ tribble(
 
 Compared with the Enroll-HD PDS: no `enroll`, `registry`, `adhoc` or `event`; one `visits` file for both studies; `cycle` everywhere.
 
-## Keys and days differ from the Enroll-HD PDS
+## Keys and days differ from the Enroll-HD PDS {.smaller}
 
 - `visdy` counts days since the participant's **first HDClarity screening**, so the Enroll-HD row of cycle 1 is negative. It **cannot be aligned** with the Enroll-HD PDS `visdy`; the offset is an SRC-request variable.
 - `seq` numbers every visit of a participant chronologically **across cycles**; `visit` is Baseline or Follow Up (`studyid` ENR) and Screening, Sampling or RPT Sampling (`studyid` CLR).
