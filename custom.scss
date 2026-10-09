@@ -2,13 +2,13 @@
 $presentation-font-size-root: 26px;   // a code-heavy deck sits a step smaller
 
 /*-- scss:rules --*/
-// Deck-specific rules on top of the site's signature (signature-reveal.scss).
+// Deck-specific rules on top of the site's signature (the chalk extension's theme).
 .reveal .disclaimer {
   display: inline-block;
   margin-top: 0.8em;
   font-size: 0.6em;
   line-height: 1.35;
-  color: rgba(#0E1412, 0.70);
+  color: rgba(#2A302D, 0.70);
   max-width: 34em;
 }
 .reveal .disclaimer-slide .callout { font-size: 0.8em; }

@@ -1,0 +1,20 @@
+title: Chalk
+author: Abhishek Bhattacharjee
+version: 0.3.0
+quarto-required: ">=1.4.0"
+# The site's marks and its deck theme, one source for stat-absk.github.io and
+# every deck. In a deck:  quarto add <path or repo>  then  format: chalk-revealjs
+contributes:
+  shortcodes:
+    - chalk.lua
+  filters:
+    - chalk-typst.lua
+  formats:
+    revealjs:
+      theme: [default, chalk-reveal.scss]
+      width: 1280
+      height: 720
+      transition: none
+      embed-resources: true
+      title-slide-attributes:
+        data-background-color: "#F2F3EA"

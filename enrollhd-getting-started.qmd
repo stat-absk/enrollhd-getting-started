@@ -6,8 +6,8 @@ date: today
 title-slide-attributes:
   data-notes: "Disclaimer: public sources only, no participant data."
 format:
-  revealjs:
-    theme: [default, signature-reveal.scss, custom.scss]
+  chalk-revealjs:
+    theme: [default, _extensions/chalk/chalk-reveal.scss, custom.scss]
     slide-number: true
     code-line-numbers: false
     code-overflow: wrap
