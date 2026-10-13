@@ -1,0 +1,2240 @@
+---
+title: "HDClarity: a first look"
+subtitle: "Cohort, cUHDRS by HD category, CSF quality and Olink proteomics"
+date: today
+footer: "HDClarity: a first look"
+format:
+  revealjs:
+    width: 1600
+    height: 900
+    margin: 0.06
+    slide-number: c/t
+    transition: none
+    center: false
+    embed-resources: true
+    fig-dpi: 144
+    fig-width: 12
+    fig-height: 5.2
+    fig-align: center
+    include-in-header:
+      text: |
+        <style>
+        /* Tufte palette, matching the report: paper, ink, one red accent */
+        :root { --ink: #1a1a1a; --paper: #fafaf7; --rule: #d8d4cc;
+                --muted: #8a857c; --secondary: #6b665d; --accent: #b3261e; }
+        .reveal-viewport { background-color: var(--paper) !important; }
+        .reveal { font-family: Charter, "Bitstream Charter", Georgia, serif !important;
+                  color: var(--ink) !important; font-size: 30px !important; }
+        .reveal h1, .reveal h2, .reveal h3 {
+          font-family: inherit !important; font-weight: 400 !important;
+          color: var(--ink) !important; text-transform: none !important;
+          letter-spacing: 0 !important; }
+        .reveal h2 { font-size: 1.45em !important; margin-bottom: 0.25em !important; }
+        .reveal .why { border-left: 3px solid var(--accent); padding-left: 0.6em;
+                       margin: 0.1em 0 0.4em; font-size: 0.72em; color: var(--secondary); }
+        .reveal .result { border-top: 1px solid var(--rule); padding-top: 0.3em;
+                          margin-top: 0.3em; font-size: 0.72em; }
+        .reveal .footer, .reveal .slide-number {
+          color: var(--muted) !important; background: transparent !important; }
+        .reveal .callout { border-left: 3px solid var(--accent) !important;
+                           background: transparent !important; }
+        </style>
+execute:
+  echo: false
+  warning: false
+  message: false
+params:
+  # Folder holding the HDClarity PDS4 files (profile, participation, visits,
+  # csfquality, ...). No data are included in this repository.
+  data_dir: "data"
+  # Olink Explore 3072 data in long format, one file per matrix. Leave a
+  # path empty ("") to skip that matrix; with both empty the Olink slides
+  # are dropped.
+  olink_csf: "data/olink_csf.csv.gz"
+  olink_serum: "data/olink_serum.csv.gz"
+  # Sample manifest (sample ID, subjid, visit day). Only needed when the
+  # Olink files do not already carry subjid and the visit day.
+  olink_manifest: "data/olink_manifest.csv"
+  # "synthetic" or "real". "real" puts the data-use warning on the slides.
+  data_label: "synthetic"
+  # Smallest count printed in a table; smaller counts show as "<min_cell".
+  min_cell: 5
+  # Smallest research CAG counted as a gene carrier.
+  carrier_cag_min: 40
+  # Olink assays detected in fewer samples than this share are left out of
+  # the association screens.
+  min_detected: 0.5
+  # False discovery rate for the protein screens.
+  fdr: 0.05
+---
+
+```{r}
+#| label: setup
+#| include: false
+
+# The slides recompute everything from the data in `params`. All
+# preparation sits in the hidden chunks at the top; the slides below only
+# draw figures and write result lines.
+
+# Base R checks the packages, because the tidyverse may be the missing one.
+required_packages <- c(
+  "tidyverse", "vroom", "gt", "patchwork", "ggrepel", "broom"
+)
+is_installed <- vapply(
+  required_packages, requireNamespace, logical(1), quietly = TRUE
+)
+if (!all(is_installed)) {
+  stop(
+    "Install these packages before rendering: ",
+    paste(required_packages[!is_installed], collapse = ", "),
+    call. = FALSE
+  )
+}
+
+library(tidyverse)
+library(gt)
+library(patchwork)
+library(ggrepel)
+
+# ragg draws sharper figures and finds system fonts; png is the fallback.
+knitr::opts_chunk$set(
+  dev = if (requireNamespace("ragg", quietly = TRUE)) "ragg_png" else "png"
+)
+
+# An empty path parameter means "skip this input".
+param_path <- function(value) {
+  if (is.null(value) || length(value) == 0 || is.na(value)) {
+    return("")
+  }
+  as.character(value)
+}
+
+settings <- list(
+  data_dir = param_path(params$data_dir),
+  olink_paths = c(
+    CSF = param_path(params$olink_csf),
+    Serum = param_path(params$olink_serum)
+  ),
+  olink_manifest = param_path(params$olink_manifest),
+  real_data = identical(params$data_label, "real"),
+  min_cell = as.integer(params$min_cell),
+  carrier_cag_min = as.numeric(params$carrier_cag_min),
+  min_detected = as.numeric(params$min_detected),
+  fdr = as.numeric(params$fdr)
+)
+settings$olink_paths <- settings$olink_paths[nzchar(settings$olink_paths)]
+
+has_olink <- length(settings$olink_paths) > 0
+has_both_matrices <- length(settings$olink_paths) == 2
+
+# Olink slides are dropped from the deck when there are no Olink data.
+olink_visibility <- if (has_olink) "visible" else "hidden"
+pair_visibility <- if (has_both_matrices) "visible" else "hidden"
+
+# stop() with a glue-style message: stop_with("No `{name}` file.")
+stop_with <- function(...) {
+  stop(str_glue(..., .envir = parent.frame()), call. = FALSE)
+}
+```
+
+```{r}
+#| label: read-pds
+#| include: false
+
+pds_file_names <- c(
+  "profile", "participation", "visits", "assessment", "csfquality",
+  "pharmacotx", "nutsuppl", "nonpharmacotx", "comorbid"
+)
+
+# The file for one PDS name: "visits.csv", or a prefixed name such as
+# "hdclarity_pds4_visits.csv", optionally gzipped.
+find_pds_file <- function(name, dir) {
+  pattern <- str_glue("(^|_){name}\\.(csv|tsv|txt)(\\.gz)?$")
+  matches <- list.files(
+    dir, pattern = pattern, ignore.case = TRUE, full.names = TRUE
+  )
+  if (length(matches) == 0) {
+    stop_with("No `{name}` file in {dir}.")
+  }
+  if (length(matches) > 1) {
+    stop_with("More than one `{name}` file in {dir}.")
+  }
+  matches
+}
+
+# Files saved from Excel or written with write.csv2() can use semicolons
+# and a Windows encoding. The header line decides both. Base strsplit()
+# with useBytes is used because stringr refuses text that is not UTF-8.
+count_fields <- function(line, delim) {
+  lengths(strsplit(line, delim, fixed = TRUE, useBytes = TRUE))
+}
+
+detect_text_format <- function(path) {
+  header <- readLines(path, n = 1, warn = FALSE)
+  delimiters <- c(",", ";", "\t", "|")
+  field_counts <- map_int(delimiters, \(delim) count_fields(header, delim))
+  encoding <- if (validUTF8(header)) "UTF-8" else "windows-1252"
+  list(
+    delim = delimiters[which.max(field_counts)],
+    locale = vroom::locale(encoding = encoding)
+  )
+}
+
+# Numbers stored as text, with a decimal point or a decimal comma.
+as_number <- function(text) {
+  uses_decimal_comma <- any(str_detect(text, ","), na.rm = TRUE) &&
+    !any(str_detect(text, fixed(".")), na.rm = TRUE)
+  if (uses_decimal_comma) {
+    text <- str_replace(text, ",", ".")
+  }
+  as.numeric(text)
+}
+
+# Every column is read as text and then typed from all rows, so a sparse
+# column is not mistyped from its first few values.
+read_pds_file <- function(path) {
+  format <- detect_text_format(path)
+  vroom::vroom(
+    path,
+    delim = format$delim,
+    locale = format$locale,
+    col_types = vroom::cols(.default = vroom::col_character()),
+    na = c("", "NA"),
+    progress = FALSE,
+    show_col_types = FALSE
+  ) |>
+    readr::type_convert(na = c("", "NA")) |>
+    suppressMessages()
+}
+
+if (!dir.exists(settings$data_dir)) {
+  stop_with("The data folder does not exist: {settings$data_dir}")
+}
+
+pds_paths <- pds_file_names |>
+  set_names() |>
+  map_chr(find_pds_file, dir = settings$data_dir)
+
+pds <- map(pds_paths, read_pds_file)
+```
+
+```{r}
+#| label: check-pds
+#| include: false
+
+# The columns the slides use, by file. A release without them stops here
+# with a message naming the file and the columns.
+required_columns <- list(
+  profile = c("subjid", "sex", "caghigh", "region"),
+  participation = c("subjid", "cycle", "age", "hdcat"),
+  visits = c(
+    "subjid", "seq", "studyid", "visit", "visdy", "cycle", "age",
+    "diagconf", "motscore", "tfcscore", "sdmt1", "swrt1", "capscore",
+    "hdiss_stage_imp", "isced"
+  ),
+  csfquality = c(
+    "subjid", "visdy", "eryflag",
+    "erycnt1", "erycnt2", "erycnt3", "leukcnt1", "leukcnt2", "leukcnt3"
+  )
+)
+
+check_columns <- function(data, columns, file) {
+  absent <- setdiff(columns, names(data))
+  if (length(absent) > 0) {
+    stop_with("`{file}` lacks the column(s): {str_flatten_comma(absent)}.")
+  }
+}
+
+check_unique <- function(data, keys, file) {
+  repeats <- data |>
+    count(across(all_of(keys))) |>
+    filter(n > 1)
+  if (nrow(repeats) > 0) {
+    stop_with("`{file}` has repeated {str_flatten(keys, ' + ')} keys.")
+  }
+}
+
+iwalk(required_columns, \(columns, file) {
+  check_columns(pds[[file]], columns, file)
+})
+check_unique(pds$visits, c("subjid", "seq"), "visits")
+check_unique(pds$participation, c("subjid", "cycle"), "participation")
+```
+
+```{r}
+#| label: conventions
+#| include: false
+
+# Numeric PDS fields can hold user-defined missing codes (wrong, not
+# applicable, missing, unknown), and aggregated values are text such as
+# ">70".
+pds_missing_codes <- c(9996, 9997, 9998, 9999)
+
+as_capped_number <- function(x) {
+  number <- readr::parse_number(as.character(x), na = c("", "NA"))
+  if_else(number %in% pds_missing_codes, NA, number)
+}
+
+# HDClarity categories in disease order. These codes differ from the
+# Enroll-HD hdcat codes.
+hdcat_labels <- c(
+  "6" = "Control",
+  "1" = "Early premanifest",
+  "2" = "Late premanifest",
+  "3" = "Early HD",
+  "4" = "Moderate HD",
+  "5" = "Advanced HD",
+  "8" = "Incomplete penetrance"
+)
+
+label_hdcat <- function(hdcat) {
+  factor(unname(hdcat_labels[as.character(hdcat)]), levels = hdcat_labels)
+}
+
+# Composite UHDRS (Schobel et al. 2017): each part is standardised against
+# the TRACK-HD reference, TMS is reversed, and the sum is shifted by 10.
+# Lower is worse.
+cuhdrs_terms <- function(tfc, tms, sdmt, swr) {
+  tibble(
+    TFC = (tfc - 10.4) / 1.9,
+    `TMS (reversed)` = -(tms - 29.7) / 14.9,
+    SDMT = (sdmt - 28.4) / 11.3,
+    `Stroop word reading` = (swr - 66.1) / 20.1
+  )
+}
+
+cuhdrs_parts <- c("TFC", "TMS (reversed)", "SDMT", "Stroop word reading")
+
+compute_cuhdrs <- function(tfc, tms, sdmt, swr) {
+  rowSums(cuhdrs_terms(tfc, tms, sdmt, swr)) + 10
+}
+```
+
+```{r}
+#| label: build-tables
+#| include: false
+
+# Participants ----
+
+participants <- pds$profile |>
+  transmute(
+    subjid,
+    sex = factor(sex, levels = c("f", "m"), labels = c("Female", "Male")),
+    region,
+    caghigh = as_capped_number(caghigh)
+  )
+
+# Education is copied from Enroll-HD; take each participant's first value.
+education <- pds$visits |>
+  mutate(isced = as_capped_number(isced)) |>
+  filter(!is.na(isced)) |>
+  arrange(subjid, seq) |>
+  summarise(isced = first(isced), .by = subjid)
+
+# Sampling visits ----
+
+# TMS, CAP score, HD-ISS stage and diagnostic confidence are recorded at
+# every sampling and repeat sampling visit.
+sampling_visits <- pds$visits |>
+  filter(studyid == "CLR", visit %in% c("Sampling", "RPT Sampling")) |>
+  transmute(
+    subjid,
+    cycle,
+    sampling_visit = visit,
+    sampling_visdy = visdy,
+    sampling_age = as_capped_number(age),
+    sampling_tms = as_capped_number(motscore),
+    capscore = as_capped_number(capscore),
+    hdiss_stage = as_capped_number(hdiss_stage_imp),
+    diagconf = as_capped_number(diagconf)
+  )
+
+# A package's main sampling visit: the Sampling visit, or the repeat when
+# the first lumbar puncture failed.
+primary_sampling <- sampling_visits |>
+  arrange(sampling_visit != "Sampling", sampling_visdy) |>
+  slice_head(n = 1, by = c(subjid, cycle))
+
+# Clinical source visit ----
+
+# TFC, SDMT and Stroop come from the package's Enroll-HD visit, or from
+# the HDClarity screening when there was no Enroll-HD visit in the 90 days
+# before it (PDS4 dataset structure guide, sections 3 and 8).
+clinical_visits <- pds$visits |>
+  filter(!visit %in% c("Sampling", "RPT Sampling")) |>
+  transmute(
+    subjid,
+    cycle,
+    source_study = studyid,
+    source_visdy = visdy,
+    tfc = as_capped_number(tfcscore),
+    tms = as_capped_number(motscore),
+    sdmt = as_capped_number(sdmt1),
+    swr = as_capped_number(swrt1)
+  )
+
+# Within a package, the visit with all four cUHDRS parts that lies closest
+# to the sampling visit; an Enroll-HD visit wins a tie.
+source_visits <- clinical_visits |>
+  drop_na(tfc, tms, sdmt, swr) |>
+  inner_join(
+    primary_sampling |> select(subjid, cycle, sampling_visdy),
+    by = c("subjid", "cycle")
+  ) |>
+  mutate(gap_days = sampling_visdy - source_visdy) |>
+  arrange(abs(gap_days), source_study != "ENR") |>
+  slice_head(n = 1, by = c(subjid, cycle)) |>
+  mutate(cuhdrs = compute_cuhdrs(tfc, tms, sdmt, swr)) |>
+  select(-sampling_visdy)
+
+# Packages ----
+
+# One row per visit package: category and age at its screening, its main
+# sampling visit and its clinical source visit.
+packages <- pds$participation |>
+  transmute(
+    subjid,
+    cycle,
+    hdcat = as_capped_number(hdcat),
+    group = label_hdcat(hdcat),
+    age_screening = as_capped_number(age)
+  ) |>
+  left_join(primary_sampling, by = c("subjid", "cycle")) |>
+  left_join(source_visits, by = c("subjid", "cycle")) |>
+  left_join(participants, by = "subjid") |>
+  left_join(education, by = "subjid") |>
+  mutate(
+    carrier = hdcat %in% 1:5 &
+      coalesce(caghigh >= settings$carrier_cag_min, FALSE)
+  ) |>
+  mutate(
+    package_number = dense_rank(cycle),
+    packages_total = n(),
+    years_since_first =
+      (sampling_visdy - min(sampling_visdy, na.rm = TRUE)) / 365.25,
+    .by = subjid
+  ) |>
+  arrange(subjid, cycle)
+
+first_packages <- packages |>
+  filter(package_number == 1)
+```
+
+```{r}
+#| label: helpers
+#| include: false
+
+# Formatting, with small counts suppressed ----
+
+format_number <- function(x, digits = 0) {
+  formatC(x, format = "f", digits = digits, big.mark = ",")
+}
+
+format_percent <- function(share) {
+  scales::percent(share, accuracy = 1)
+}
+
+# A bare count, or "<min_cell" when it is small.
+format_n <- function(n, min_cell = settings$min_cell) {
+  if_else(
+    n > 0 & n < min_cell,
+    str_glue("<{min_cell}"),
+    format_number(n)
+  ) |>
+    as.character()
+}
+
+# A count with its share, or "<min_cell" when the count is small.
+format_count <- function(n, total, min_cell = settings$min_cell) {
+  case_when(
+    n == 0 ~ "0",
+    n < min_cell ~ str_glue("<{min_cell}"),
+    .default = str_glue("{n} ({format_percent(n / total)})")
+  ) |>
+    as.character()
+}
+
+format_median_iqr <- function(x, digits = 0) {
+  x <- x[!is.na(x)]
+  if (length(x) == 0) {
+    return("–")
+  }
+  quartiles <- quantile(x, c(0.25, 0.5, 0.75), names = FALSE) |>
+    format_number(digits)
+  str_glue("{quartiles[2]} ({quartiles[1]}–{quartiles[3]})")
+}
+
+format_p <- function(p) {
+  if_else(
+    p < 0.001,
+    formatC(p, format = "e", digits = 1),
+    formatC(p, format = "f", digits = 3)
+  )
+}
+
+join_with_dots <- function(texts) {
+  str_flatten(texts, " · ")
+}
+
+# The result line under a figure, written from computed numbers.
+show_result <- function(...) {
+  cat("::: {.result}", str_c(...), ":::", sep = "\n")
+}
+
+# Groups ----
+
+# Groups smaller than min_cell are left out of figures.
+drop_small_groups <- function(data, min_cell = settings$min_cell) {
+  data |>
+    filter(!is.na(group)) |>
+    filter(n_distinct(subjid) >= min_cell, .by = group) |>
+    mutate(group = fct_drop(group))
+}
+
+# Short names: on two lines for crowded axes, on one line for text.
+short_group_labels <- c(
+  "Control" = "Control",
+  "Early premanifest" = "Early\npre",
+  "Late premanifest" = "Late\npre",
+  "Early HD" = "Early\nHD",
+  "Moderate HD" = "Moderate\nHD",
+  "Advanced HD" = "Advanced\nHD",
+  "Incomplete penetrance" = "Incomplete\npenetrance"
+)
+
+short_group_names <- short_group_labels |>
+  str_replace("\n", " ") |>
+  set_names(names(short_group_labels))
+
+shorten_group <- function(group) {
+  unname(short_group_names[as.character(group)])
+}
+
+# Axis labels with each group's size on the last line.
+label_groups_with_n <- function(data) {
+  data |>
+    summarise(n = n_distinct(subjid), .by = group) |>
+    arrange(group) |>
+    mutate(
+      short_label = short_group_labels[as.character(group)],
+      label = str_glue("{short_label}\nn = {format_n(n)}")
+    ) |>
+    select(group, label) |>
+    deframe()
+}
+
+# "Control 17.6 · Early pre 16.5 · …", for the result lines.
+describe_group_medians <- function(data, value, digits = 1) {
+  data |>
+    filter(!is.na({{ value }})) |>
+    drop_small_groups() |>
+    summarise(median = median({{ value }}), .by = group) |>
+    arrange(group) |>
+    mutate(
+      median_text = format_number(median, digits),
+      text = str_glue("{shorten_group(group)} {median_text}")
+    ) |>
+    pull(text) |>
+    join_with_dots()
+}
+
+# Figures, after Tufte ----
+
+# Data in ink, context in grey, one red accent; no gridlines or legends;
+# axes stop at the outermost breaks.
+ink_colour <- "#1a1a1a"
+paper_colour <- "#fafaf7"
+rule_colour <- "#d8d4cc"
+context_colour <- "#c8c2b5"
+secondary_colour <- "#6b665d"
+muted_colour <- "#8a857c"
+accent_colour <- "#b3261e"
+
+has_charter <- requireNamespace("systemfonts", quietly = TRUE) &&
+  "Charter" %in% systemfonts::system_fonts()$family
+report_font <- if (has_charter) "Charter" else "serif"
+
+theme_slides <- function(base_size = 16) {
+  slide_theme <- theme_minimal(
+    base_size = base_size,
+    base_family = report_font
+  ) +
+    theme(
+      plot.background = element_rect(fill = paper_colour, colour = NA),
+      panel.background = element_rect(fill = paper_colour, colour = NA),
+      panel.grid = element_blank(),
+      panel.spacing = unit(1.2, "lines"),
+      axis.line = element_line(colour = secondary_colour, linewidth = 0.3),
+      axis.ticks = element_line(colour = secondary_colour, linewidth = 0.3),
+      axis.text = element_text(colour = secondary_colour, size = rel(0.85)),
+      axis.title = element_text(colour = secondary_colour, size = rel(0.9)),
+      strip.text = element_text(colour = ink_colour, hjust = 0),
+      legend.position = "none"
+    )
+  # A range frame: each axis line stops at its outermost breaks.
+  list(
+    slide_theme,
+    guides(x = guide_axis(cap = "both"), y = guide_axis(cap = "both"))
+  )
+}
+
+quantile_25 <- function(x) quantile(x, 0.25, names = FALSE)
+quantile_75 <- function(x) quantile(x, 0.75, names = FALSE)
+
+# A median and interquartile range in ink.
+summarise_median_iqr <- function(linewidth = 0.8, size = 0.45) {
+  stat_summary(
+    fun = median,
+    fun.min = quantile_25,
+    fun.max = quantile_75,
+    colour = ink_colour,
+    linewidth = linewidth,
+    size = size
+  )
+}
+
+# One grey point per participant, with the group median and IQR.
+plot_strip_by_group <- function(data, y) {
+  ggplot(data, aes(x = group, y = {{ y }})) +
+    geom_jitter(
+      width = 0.18,
+      height = 0,
+      colour = context_colour,
+      size = 1.1,
+      alpha = 0.8
+    ) +
+    summarise_median_iqr()
+}
+
+# Tables ----
+
+style_table <- function(table, font_size = 17) {
+  table |>
+    opt_table_font(font = c(report_font, "Georgia", "serif")) |>
+    tab_options(
+      table.font.size = px(font_size),
+      table.font.color = ink_colour,
+      table.background.color = paper_colour,
+      table.border.top.color = ink_colour,
+      table.border.top.width = px(1),
+      table.border.bottom.color = ink_colour,
+      table.border.bottom.width = px(1),
+      column_labels.font.weight = "normal",
+      column_labels.border.bottom.color = ink_colour,
+      column_labels.border.bottom.width = px(0.5),
+      table_body.hlines.color = "transparent",
+      table_body.border.bottom.color = ink_colour,
+      row_group.border.top.color = rule_colour,
+      row_group.border.bottom.color = "transparent",
+      stub.border.color = "transparent",
+      data_row.padding = px(2)
+    )
+}
+```
+
+```{r}
+#| label: clinical-results
+#| include: false
+
+# From release to analysis ----
+
+# Participants and packages (or CSF collections) at one step.
+count_step <- function(data, step, keys = c("subjid", "cycle")) {
+  tibble(
+    step = step,
+    participants = n_distinct(data$subjid),
+    packages = nrow(distinct(data, across(all_of(keys))))
+  )
+}
+
+repeat_packages <- packages |>
+  filter(packages_total > 1)
+
+flow <- bind_rows(
+  count_step(pds$participation, "In the release"),
+  count_step(primary_sampling, "With a sampling visit"),
+  count_step(
+    pds$csfquality,
+    "With a CSF quality record",
+    keys = c("subjid", "visdy")
+  ),
+  count_step(source_visits, "With a complete cUHDRS"),
+  count_step(repeat_packages, "With more than one package")
+)
+
+packages_per_participant <- packages |>
+  distinct(subjid, packages_total)
+
+single_package_share <- mean(packages_per_participant$packages_total == 1)
+
+package_gaps <- packages |>
+  filter(!is.na(sampling_visdy)) |>
+  arrange(subjid, sampling_visdy) |>
+  mutate(
+    gap_years = (sampling_visdy - lag(sampling_visdy)) / 365.25,
+    .by = subjid
+  ) |>
+  filter(!is.na(gap_years))
+
+source_summary <- source_visits |>
+  summarise(
+    enroll_share = mean(source_study == "ENR"),
+    gap = format_median_iqr(gap_days)
+  )
+
+# cUHDRS ----
+
+cuhdrs_first <- first_packages |>
+  filter(!is.na(cuhdrs)) |>
+  drop_small_groups()
+
+control_age_rho <- cuhdrs_first |>
+  filter(group == "Control") |>
+  summarise(rho = cor(age_screening, cuhdrs, method = "spearman")) |>
+  pull(rho)
+
+cap_data <- first_packages |>
+  filter(carrier, !is.na(cuhdrs), !is.na(capscore))
+
+cap_rho <- cap_data |>
+  summarise(rho = cor(capscore, cuhdrs, method = "spearman")) |>
+  pull(rho)
+
+# Each part's contribution to the cUHDRS difference from controls. The
+# four parts add up to the whole difference.
+part_contributions <- first_packages |>
+  filter(!is.na(cuhdrs), hdcat %in% c(6, 1:5)) |>
+  drop_small_groups() |>
+  mutate(cuhdrs_terms(tfc, tms, sdmt, swr)) |>
+  pivot_longer(all_of(cuhdrs_parts), names_to = "part", values_to = "term") |>
+  summarise(mean_term = mean(term), .by = c(group, part)) |>
+  mutate(
+    difference = mean_term - mean_term[group == "Control"],
+    .by = part
+  )
+
+largest_drop_by_group <- part_contributions |>
+  filter(group != "Control") |>
+  slice_min(difference, n = 1, by = group) |>
+  arrange(group)
+
+# Repeat packages ----
+
+repeated_cuhdrs <- packages |>
+  filter(!is.na(cuhdrs)) |>
+  filter(n() > 1, .by = subjid) |>
+  mutate(first_group = group[which.min(cycle)], .by = subjid)
+
+annual_change <- repeated_cuhdrs |>
+  arrange(subjid, cycle) |>
+  summarise(
+    group = first(first_group),
+    years = last(years_since_first) - first(years_since_first),
+    change = last(cuhdrs) - first(cuhdrs),
+    .by = subjid
+  ) |>
+  filter(years > 0) |>
+  mutate(change_per_year = change / years)
+
+change_by_group <- annual_change |>
+  filter(!is.na(group)) |>
+  summarise(
+    participants = n(),
+    change_per_year = median(change_per_year),
+    .by = group
+  ) |>
+  filter(participants >= settings$min_cell) |>
+  arrange(group)
+
+# CSF quality ----
+
+red_cell_columns <- str_c("erycnt", 1:3)
+white_cell_columns <- str_c("leukcnt", 1:3)
+cell_count_columns <- c(red_cell_columns, white_cell_columns)
+
+# The mean of a triplicate count; NA when all three are missing.
+mean_of_counts <- function(counts) {
+  means <- rowMeans(counts, na.rm = TRUE)
+  if_else(is.nan(means), NA, means)
+}
+
+csf_collections <- pds$csfquality |>
+  mutate(across(all_of(cell_count_columns), as_capped_number)) |>
+  transmute(
+    subjid,
+    visdy,
+    erythrocytes = mean_of_counts(pick(all_of(red_cell_columns))),
+    leukocytes = mean_of_counts(pick(all_of(white_cell_columns))),
+    erythrocyte_flag = as_capped_number(eryflag) == 1
+  ) |>
+  left_join(
+    sampling_visits |> select(subjid, visdy = sampling_visdy, cycle),
+    by = c("subjid", "visdy")
+  ) |>
+  left_join(
+    packages |> select(subjid, cycle, group),
+    by = c("subjid", "cycle")
+  )
+```
+
+```{r}
+#| label: olink-read
+#| include: false
+#| eval: !expr has_olink
+
+# Each field the slides need, with the column names it accepts: Olink's
+# export name first, then janitor's snake_case. An exact match wins;
+# otherwise case, spaces and punctuation are ignored.
+olink_column_names <- list(
+  sample_id = c("SampleID", "sample_id"),
+  plate = c("PlateID", "plate_id"),
+  olink_id = c("OlinkID", "olink_id"),
+  assay = c("Assay", "assay"),
+  panel = c("Panel", "panel"),
+  npx = c("NPX", "npx"),
+  lod = c("LOD", "lod"),
+  sample_qc = c("QC_Warning", "qc_warning", "SampleQC", "sample_qc"),
+  assay_qc = c("Assay_Warning", "assay_warning", "AssayQC", "assay_qc"),
+  # optional: Olink's well type, and the plate-map link to the visit
+  sample_type = c("Sample_Type", "sample_type"),
+  subjid = c("subjid", "subject_id"),
+  visdy = c("visdy", "visit_day")
+)
+optional_olink_fields <- c("sample_type", "subjid", "visdy")
+manifest_column_names <- olink_column_names[c("sample_id", "subjid", "visdy")]
+
+# The protein used as a known positive check: neurofilament light.
+positive_control <- "NEFL"
+
+simplify_name <- function(name) {
+  str_to_lower(str_remove_all(name, "[^[:alnum:]]"))
+}
+
+# The file's column for each field (named field = column).
+match_columns <- function(available, accepted, file, optional = character()) {
+  pick_column <- function(candidates) {
+    exact <- intersect(candidates, available)
+    loose <- available[simplify_name(available) %in% simplify_name(candidates)]
+    c(exact, loose, NA_character_)[1]
+  }
+  found <- map_chr(accepted, pick_column)
+  absent <- setdiff(names(found)[is.na(found)], optional)
+  if (length(absent) > 0) {
+    stop_with(
+      "`{file}` has no column for: {str_flatten_comma(absent)}. ",
+      "Its columns are: {str_flatten_comma(available)}."
+    )
+  }
+  found[!is.na(found)]
+}
+
+# Only the needed columns are read: the Olink files are several hundred
+# megabytes each.
+read_columns <- function(path, accepted, optional = character()) {
+  format <- detect_text_format(path)
+  header <- vroom::vroom(
+    path,
+    delim = format$delim,
+    locale = format$locale,
+    n_max = 0,
+    show_col_types = FALSE,
+    progress = FALSE
+  ) |>
+    names()
+  columns <- match_columns(header, accepted, basename(path), optional)
+
+  vroom::vroom(
+    path,
+    delim = format$delim,
+    locale = format$locale,
+    col_select = all_of(columns),
+    col_types = vroom::cols(.default = vroom::col_character()),
+    na = c("", "NA"),
+    progress = FALSE,
+    show_col_types = FALSE
+  ) |>
+    mutate(across(any_of(c("npx", "lod", "visdy")), as_number))
+}
+
+# One matrix in a common shape. Participant samples are the SAMPLE wells
+# when Olink's well type is present, otherwise the rows linked to a
+# participant (control wells have none).
+read_olink_matrix <- function(path, manifest) {
+  values <- read_columns(path, olink_column_names, optional_olink_fields)
+
+  if (!all(c("subjid", "visdy") %in% names(values))) {
+    if (is.null(manifest)) {
+      stop_with(
+        "`{basename(path)}` has no subjid and visit day, ",
+        "and no manifest was given."
+      )
+    }
+    values <- values |>
+      select(-any_of(c("subjid", "visdy"))) |>
+      left_join(manifest, by = "sample_id")
+  }
+
+  has_well_type <- "sample_type" %in% names(values)
+  values |>
+    mutate(
+      is_sample = if (has_well_type) sample_type == "SAMPLE" else !is.na(subjid)
+    ) |>
+    select(-any_of("sample_type"))
+}
+
+walk(settings$olink_paths, \(path) {
+  if (!file.exists(path)) stop_with("Olink file not found: {path}")
+})
+
+manifest <- if (nzchar(settings$olink_manifest)) {
+  read_columns(settings$olink_manifest, manifest_column_names)
+}
+
+olink <- settings$olink_paths |>
+  imap(\(path, matrix) {
+    read_olink_matrix(path, manifest) |>
+      mutate(matrix = matrix, .before = 1)
+  }) |>
+  list_rbind()
+```
+
+```{r}
+#| label: olink-link
+#| include: false
+#| eval: !expr has_olink
+
+# Each sample's participant and sampling-visit day, then that visit's
+# package. A sample run on several plates keeps its first plate.
+sample_info <- olink |>
+  filter(is_sample) |>
+  summarise(plate = first(plate), .by = c(matrix, sample_id, subjid, visdy))
+
+linked_samples <- sample_info |>
+  left_join(
+    sampling_visits |>
+      select(subjid, visdy = sampling_visdy, cycle, sampling_age),
+    by = c("subjid", "visdy")
+  )
+
+# One sample per participant and matrix: the earliest.
+olink_samples <- linked_samples |>
+  filter(!is.na(cycle)) |>
+  slice_min(visdy, n = 1, with_ties = FALSE, by = c(subjid, matrix)) |>
+  left_join(
+    packages |> select(subjid, cycle, hdcat, group, carrier, cuhdrs, sex),
+    by = c("subjid", "cycle")
+  )
+```
+
+```{r}
+#| label: olink-quality
+#| include: false
+#| eval: !expr has_olink
+
+# Olink flags are PASS or WARN (FAIL in newer exports); an empty flag is
+# not a warning.
+is_warning <- function(flag) {
+  !is.na(flag) & toupper(flag) != "PASS"
+}
+
+olink_samples_only <- olink |>
+  filter(is_sample)
+
+# Samples and assays that passed Olink's QC. Values below the LOD stay in,
+# as Olink advises.
+olink_clean <- olink_samples_only |>
+  filter(!is_warning(sample_qc), !is_warning(assay_qc), !is.na(npx))
+
+detection <- olink_clean |>
+  filter(!is.na(lod)) |>
+  summarise(
+    detected = mean(npx >= lod),
+    .by = c(matrix, olink_id, assay, panel)
+  )
+
+kept_assays <- detection |>
+  filter(detected >= settings$min_detected)
+
+# The overview table, built from one summary per question.
+sample_links <- linked_samples |>
+  summarise(
+    samples = n(),
+    linked = sum(!is.na(cycle)),
+    participants = n_distinct(subjid[!is.na(cycle)]),
+    .by = matrix
+  )
+
+sample_warnings <- olink_samples_only |>
+  distinct(matrix, sample_id, panel, sample_qc) |>
+  summarise(sample_warnings = mean(is_warning(sample_qc)), .by = matrix)
+
+lod_summary <- olink_samples_only |>
+  filter(!is.na(npx), !is.na(lod)) |>
+  summarise(
+    below_lod = mean(npx < lod),
+    assays = n_distinct(olink_id),
+    .by = matrix
+  )
+
+olink_overview <- sample_links |>
+  left_join(sample_warnings, by = "matrix") |>
+  left_join(lod_summary, by = "matrix") |>
+  left_join(count(kept_assays, matrix, name = "assays_kept"), by = "matrix")
+
+# Analysis values: QC-passed values of the analysed samples, replicate
+# wells averaged, and the assays kept for the screens.
+olink_values <- olink_clean |>
+  select(matrix, sample_id, olink_id, assay, panel, npx) |>
+  inner_join(
+    olink_samples |>
+      select(
+        matrix, sample_id, subjid, group, hdcat, carrier, cuhdrs, sex,
+        age = sampling_age
+      ),
+    by = c("matrix", "sample_id")
+  ) |>
+  summarise(
+    npx = mean(npx),
+    .by = c(
+      matrix, subjid, sample_id, olink_id, assay, panel,
+      group, hdcat, carrier, cuhdrs, sex, age
+    )
+  )
+
+olink_analysis <- olink_values |>
+  semi_join(kept_assays, by = c("matrix", "olink_id"))
+
+nefl <- olink_values |>
+  filter(assay == positive_control)
+```
+
+```{r}
+#| label: olink-batch
+#| include: false
+#| eval: !expr has_olink
+
+fill_with_median <- function(values) {
+  coalesce(values, median(values, na.rm = TRUE))
+}
+
+is_varying <- function(values) {
+  is.numeric(values) && sd(values) > 0
+}
+
+# PCA needs a complete samples × assays matrix: missing values are filled
+# with the assay's median, and constant assays are dropped.
+run_pca <- function(long_values, n_components = 5) {
+  wide_values <- long_values |>
+    select(sample_id, olink_id, npx) |>
+    pivot_wider(names_from = olink_id, values_from = npx) |>
+    mutate(across(-sample_id, fill_with_median)) |>
+    select(sample_id, where(is_varying))
+
+  pca <- wide_values |>
+    select(-sample_id) |>
+    prcomp(scale. = TRUE)
+
+  scores <- pca$x[, seq_len(n_components)] |>
+    as_tibble() |>
+    rename_with(str_to_lower)
+
+  list(
+    scores = bind_cols(select(wide_values, sample_id), scores),
+    variance = (pca$sdev^2 / sum(pca$sdev^2))[seq_len(n_components)]
+  )
+}
+
+pca_by_matrix <- olink_analysis |>
+  nest(.by = matrix) |>
+  mutate(pca = map(data, run_pca))
+
+pca_scores <- pca_by_matrix |>
+  transmute(matrix, scores = map(pca, "scores")) |>
+  unnest(scores) |>
+  left_join(
+    olink_samples |>
+      select(matrix, sample_id, subjid, plate, group, sex, age = sampling_age),
+    by = c("matrix", "sample_id")
+  )
+
+batch_factors <- c("plate", "group", "sex", "age")
+
+# R² of one component's scores on one factor.
+r_squared_on <- function(scores, factor_name) {
+  data <- scores |>
+    filter(!is.na(.data[[factor_name]]))
+  if (n_distinct(data[[factor_name]]) < 2) {
+    return(NA_real_)
+  }
+  fit <- lm(reformulate(factor_name, response = "score"), data = data)
+  summary(fit)$r.squared
+}
+
+r_squared_by_factor <- function(scores) {
+  batch_factors |>
+    set_names() |>
+    map_dbl(\(factor_name) r_squared_on(scores, factor_name))
+}
+
+batch_table <- pca_scores |>
+  pivot_longer(
+    starts_with("pc"),
+    names_to = "component",
+    values_to = "score"
+  ) |>
+  nest(.by = c(matrix, component)) |>
+  mutate(r_squared = map(data, r_squared_by_factor)) |>
+  select(-data) |>
+  unnest_wider(r_squared)
+
+# The largest R² of each factor over the first five components.
+batch_summary <- batch_table |>
+  summarise(
+    across(c(plate, group, age), \(r_squared) max(r_squared, na.rm = TRUE)),
+    .by = matrix
+  )
+```
+
+```{r}
+#| label: olink-differential
+#| include: false
+#| eval: !expr has_olink
+
+# Carriers against controls: one linear model per protein, adjusted for
+# age and sex. Incomplete penetrance is left out.
+fit_carrier_difference <- function(data) {
+  lm(npx ~ carrier + age + sex, data = data) |>
+    broom::tidy() |>
+    filter(term == "carrierTRUE") |>
+    select(estimate, p.value)
+}
+
+differential <- olink_analysis |>
+  filter(carrier | hdcat == 6, !is.na(age), !is.na(sex)) |>
+  nest(.by = c(matrix, olink_id, assay, panel)) |>
+  mutate(fit = map(data, fit_carrier_difference)) |>
+  select(-data) |>
+  unnest(fit) |>
+  mutate(p_fdr = p.adjust(p.value, method = "BH"), .by = matrix)
+
+differential_counts <- differential |>
+  summarise(
+    tested = n(),
+    higher = sum(p_fdr < settings$fdr & estimate > 0),
+    lower = sum(p_fdr < settings$fdr & estimate < 0),
+    strongest = assay[which.min(p.value)],
+    .by = matrix
+  )
+```
+
+```{r}
+#| label: olink-cuhdrs
+#| include: false
+#| eval: !expr has_olink
+
+# Ranks of a variable with the covariates' linear effect removed.
+rank_residuals <- function(values, covariates) {
+  residuals(lm(rank(values) ~ ., data = covariates))
+}
+
+# Partial Spearman correlation of a protein with cUHDRS: the correlation
+# of rank residuals once the rank of age (and sex) are removed from both.
+partial_spearman <- function(data) {
+  covariates <- data |>
+    transmute(age_rank = rank(age), sex) |>
+    select(where(\(values) n_distinct(values) > 1))
+
+  rho <- cor(
+    rank_residuals(data$npx, covariates),
+    rank_residuals(data$cuhdrs, covariates)
+  )
+  df <- nrow(data) - 2 - ncol(covariates)
+  t_statistic <- rho * sqrt(df / (1 - rho^2))
+
+  tibble(n = nrow(data), rho = rho, p.value = 2 * pt(-abs(t_statistic), df))
+}
+
+cuhdrs_associations <- olink_analysis |>
+  filter(carrier, !is.na(cuhdrs), !is.na(age), !is.na(sex)) |>
+  nest(.by = c(matrix, olink_id, assay, panel)) |>
+  mutate(fit = map(data, partial_spearman)) |>
+  select(-data) |>
+  unnest(fit) |>
+  mutate(p_fdr = p.adjust(p.value, method = "BH"), .by = matrix)
+
+cuhdrs_counts <- cuhdrs_associations |>
+  summarise(
+    tested = n(),
+    passing = sum(p_fdr < settings$fdr),
+    carriers = max(n),
+    .by = matrix
+  )
+```
+
+```{r}
+#| label: olink-csf-serum
+#| include: false
+#| eval: !expr has_both_matrices
+
+# A correlation needs enough participants with both samples to mean much.
+min_paired_participants <- 10
+strong_correlation <- 0.5
+
+csf_serum <- olink_analysis |>
+  select(matrix, subjid, olink_id, assay, npx) |>
+  pivot_wider(names_from = matrix, values_from = npx) |>
+  drop_na(CSF, Serum) |>
+  summarise(
+    rho = cor(CSF, Serum, method = "spearman"),
+    participants = n(),
+    .by = c(olink_id, assay)
+  ) |>
+  filter(participants >= min_paired_participants)
+```
+
+## About these data
+
+```{r}
+#| label: data-status
+#| results: asis
+
+# Quarto does not evaluate R inside the YAML footer, so the data status is
+# appended to the footer of every slide with a style rule instead.
+data_status <- if (settings$real_data) {
+  "Contains HDClarity data · do not share outside the data use agreement"
+} else {
+  "Synthetic data · no real participant data"
+}
+footer_rule <- '.reveal .footer p::after {{ content: " · {data_status}"; }}'
+cat("<style>", str_glue(footer_rule), "</style>")
+```
+
+```{r}
+#| label: status-callout
+#| results: asis
+if (settings$real_data) {
+  cat(
+    "::: {.callout-warning}",
+    "## Contains HDClarity data",
+    "Rendered on data released under the HDClarity data use agreement.",
+    "Do not publish these slides. Counts below the small-cell threshold",
+    str_glue("show as \"<{settings$min_cell}\", and groups that small are"),
+    "left out of figures.",
+    ":::",
+    sep = "\n"
+  )
+} else {
+  cat(
+    "::: {.callout-important}",
+    "## Synthetic data only",
+    "Built only from publicly available HDClarity and Enroll-HD documentation.",
+    "**No real participant data were used, seen or summarised**; no",
+    "number here is a finding about HD.",
+    ":::",
+    sep = "\n"
+  )
+}
+```
+
+- **Scope:** the HDClarity release only, meaning the PDS4 files plus the Olink Explore 3072
+  biosample data. The Enroll-HD visits packaged inside HDClarity are part of that release, and
+  they hold most clinical scores.
+- **Statistics:** deliberately simple. Counts, medians, Spearman correlations, and linear models
+  adjusted for age and sex.
+- **Status:** a first look to see what the data can support, not confirmatory testing.
+
+::: {.notes}
+HDClarity is a CSF biobank study on the Enroll-HD platform. Participants have a yearly screening
+visit and a fasted sampling visit with a lumbar puncture and a blood draw. Clinical scales are
+mostly taken from the Enroll-HD visit in the same year, which is why those rows stay in.
+:::
+
+## Four questions
+
+1. **What is in the data?** Files, participants, visit packages and samples.
+2. **Who is in it?** The cohort by HDClarity category.
+3. **How does cUHDRS vary** with category, age, CAP score and stage, and which of its parts
+   drive the differences?
+4. **What do the biosamples look like?** CSF quality, then Olink: quality, batch, carriers
+   against controls, proteins that track cUHDRS, and CSF against serum.
+
+::: {.notes}
+Each analysis slide has three parts. The **why** line gives the reason for the analysis, the
+figure or table shows the result, and the line at the bottom gives the numbers, computed from
+whichever release the deck was rendered on.
+:::
+
+# The data
+
+## How a sample links to clinical data
+
+::: {.why}
+**Why:** every later analysis pairs a biosample with clinical scores. In HDClarity that link
+runs through the *visit package*, so it has to be understood first.
+:::
+
+```{r}
+#| label: visits-table
+visit_roles <- c(
+  "Screening" = "Eligibility; clinical scales if no recent Enroll-HD visit",
+  "Sampling" = "Lumbar puncture and blood draw within 30 days; TMS",
+  "RPT Sampling" = "Optional repeat 4–8 weeks later (first year only)",
+  "Baseline" = "Enroll-HD visit up to 90 days before; most clinical scales",
+  "Follow Up" = "Enroll-HD visit up to 90 days before; most clinical scales"
+)
+
+pds$visits |>
+  count(studyid, visit) |>
+  mutate(
+    role = visit_roles[visit],
+    n = format_n(n)
+  ) |>
+  gt() |>
+  cols_label(
+    studyid = "Study",
+    visit = "Visit",
+    n = "Visits",
+    role = "Role in the package"
+  ) |>
+  style_table(font_size = 20)
+```
+
+```{r}
+#| results: asis
+show_result(
+  str_glue("{format_n(nrow(pds$participation))} visit packages from "),
+  str_glue("{format_n(n_distinct(pds$participation$subjid))} participants. "),
+  "Visits in one package share a `cycle` number."
+)
+```
+
+::: {.notes}
+From the PDS4 dataset structure guide, sections 3 and 8:
+
+- A plate map gives each sample's subjid and the visdy of its sampling visit.
+- That finds the sampling row, and its `cycle` finds the screening and Enroll-HD visits of the
+  same package.
+- A package enters the release only if at least one CSF sample was collected successfully.
+:::
+
+## How many participants each analysis can use
+
+::: {.why}
+**Why:** losses between steps set the size of every later analysis and show where data are
+missing by design.
+:::
+
+```{r}
+#| label: flow-table
+flow |>
+  mutate(across(c(participants, packages), format_n)) |>
+  gt() |>
+  cols_label(
+    step = "",
+    participants = "Participants",
+    packages = "Packages or collections"
+  ) |>
+  style_table(font_size = 22)
+```
+
+```{r}
+#| results: asis
+single_share_text <- format_percent(single_package_share)
+gap_text <- format_median_iqr(package_gaps$gap_years, digits = 1)
+show_result(
+  str_glue("{single_share_text} of participants have a single package; "),
+  str_glue("consecutive packages are a median {gap_text} years apart.")
+)
+```
+
+::: {.notes}
+A complete cUHDRS needs all four parts (TFC, TMS, SDMT and Stroop word reading) at one visit.
+Most participants have only one package, so the data are mainly cross-sectional, and that
+shapes everything that follows.
+:::
+
+# Who is in the cohort
+
+## The cohort by HDClarity category {.scrollable}
+
+::: {.why}
+**Why:** the categories are defined by protocol (CAG, burden of pathology, motor diagnosis,
+TFC). Describing them checks they differ as intended and shows what each group brings, such as
+age differences that later analyses must adjust for.
+:::
+
+```{r}
+#| label: cohort-table
+regions <- sort(unique(na.omit(first_packages$region)))
+
+# One column of the cohort table: a group's characteristics as text.
+describe_group <- function(data) {
+  n <- nrow(data)
+  count_of <- function(condition) format_count(sum(condition, na.rm = TRUE), n)
+
+  demographics <- tribble(
+    ~characteristic, ~value,
+    "Participants", format_n(n),
+    "Female", count_of(data$sex == "Female"),
+    "Age, years", format_median_iqr(data$age_screening),
+    "CAG", format_median_iqr(data$caghigh),
+    "CAP score", format_median_iqr(data$capscore),
+    "Tertiary education", count_of(data$isced >= 5)
+  )
+  region_rows <- tibble(
+    characteristic = regions,
+    value = map_chr(regions, \(region) count_of(data$region == region))
+  )
+  scores <- tribble(
+    ~characteristic, ~value,
+    "TMS", format_median_iqr(data$tms),
+    "TFC", format_median_iqr(data$tfc),
+    "SDMT", format_median_iqr(data$sdmt),
+    "Stroop word reading", format_median_iqr(data$swr),
+    "cUHDRS", format_median_iqr(data$cuhdrs, digits = 1)
+  )
+
+  rows <- bind_rows(demographics, region_rows, scores)
+  # a group too small to describe keeps only its (suppressed) size
+  if (n < settings$min_cell) {
+    rows$value[-1] <- "–"
+  }
+  rows
+}
+
+first_packages |>
+  filter(!is.na(group)) |>
+  nest(.by = group) |>
+  arrange(group) |>
+  mutate(
+    summary = map(data, describe_group),
+    group = shorten_group(group)
+  ) |>
+  select(group, summary) |>
+  unnest(summary) |>
+  pivot_wider(names_from = group, values_from = value) |>
+  gt(rowname_col = "characteristic") |>
+  style_table(font_size = 19)
+```
+
+::: {.notes}
+- **Which package:** each participant at their first visit package. Median (interquartile range)
+  or count (%).
+- **Category definitions:**
+  - Pre-manifest carriers have CAG ≥ 40 and no motor diagnosis. They are split by burden,
+    (CAG − 35.5) × age, below or at least 250.
+  - Manifest carriers are split by TFC: 7–13, 3–6 and 0–2.
+  - Incomplete penetrance means CAG 36–39.
+- **CAP score** is age × (CAG − 30) / 6.49, a different scale from the burden score.
+- **hdcat** is reviewed at screenings 1 and 5 and carried forward between them.
+:::
+
+## HDClarity category against HD-ISS stage
+
+::: {.why}
+**Why:** the categories mix burden, motor diagnosis and function. HD-ISS (Tabrizi et al. 2022)
+stages biology and function on one scale. Seeing how they overlap shows how mixed each category
+is.
+:::
+
+```{r}
+#| label: hdiss-table
+first_packages |>
+  filter(!is.na(group)) |>
+  mutate(
+    stage = if_else(
+      is.na(hdiss_stage),
+      "Not staged",
+      str_glue("Stage {hdiss_stage}")
+    )
+  ) |>
+  count(group, stage) |>
+  mutate(n = format_n(n)) |>
+  arrange(stage) |>
+  pivot_wider(names_from = stage, values_from = n, values_fill = "0") |>
+  arrange(group) |>
+  gt(rowname_col = "group") |>
+  style_table(font_size = 22)
+```
+
+```{r}
+#| results: asis
+staged_premanifest <- first_packages |>
+  filter(hdcat %in% c(1, 2), !is.na(hdiss_stage))
+
+stage_2_or_3_share <- mean(staged_premanifest$hdiss_stage >= 2)
+
+show_result(
+  format_percent(stage_2_or_3_share),
+  " of staged pre-manifest carriers are already in HD-ISS stage 2 or 3."
+)
+```
+
+::: {.notes}
+HD-ISS stages:
+
+- stage 0: CAG ≥ 40 only;
+- stage 1: biomarker change (caudate or putamen volume);
+- stage 2: clinical signs (motor or cognitive);
+- stage 3: functional decline.
+
+The release imputes the stage for CAG 40–50 only, so controls, incomplete penetrance and
+CAG > 50 are "not staged".
+:::
+
+# cUHDRS
+
+## How cUHDRS is built here
+
+::: {.why}
+**Why:** cUHDRS combines four scales into one score that is more sensitive to change than any
+single scale (Schobel et al. 2017). In HDClarity its parts sit on different visits, so the
+pairing rule has to be explicit.
+:::
+
+$$
+\text{cUHDRS} = \frac{\text{TFC} - 10.4}{1.9} - \frac{\text{TMS} - 29.7}{14.9} + \frac{\text{SDMT} - 28.4}{11.3} + \frac{\text{SWR} - 66.1}{20.1} + 10
+$$
+
+- **Sampling visit:** records TMS only.
+- **The other three scales:** come from the package's Enroll-HD visit, or from the HDClarity
+  screening when no Enroll-HD visit fell in the previous 90 days.
+- **Pairing rule:** within each package, use the visit with all four parts that lies closest to
+  the sampling visit.
+
+```{r}
+#| results: asis
+enroll_share_text <- format_percent(source_summary$enroll_share)
+show_result(
+  str_glue("{format_n(nrow(source_visits))} packages have a complete cUHDRS; "),
+  str_glue("{enroll_share_text} come from an Enroll-HD visit, "),
+  str_glue("a median {source_summary$gap} days before sampling.")
+)
+```
+
+::: {.notes}
+The weights standardise each scale against the TRACK-HD reference and reverse TMS so that lower
+is worse for every part. A healthy adult scores about 17–18, and the score falls as HD
+progresses. Using all four parts from one visit keeps the composite internally consistent.
+:::
+
+## How does cUHDRS differ across categories?
+
+::: {.why}
+**Why:** cUHDRS is the outcome for every biomarker comparison. It should separate the
+categories it is meant to reflect, and the overlap between them shows how much it adds beyond
+the category label.
+:::
+
+```{r}
+#| label: cuhdrs-group-figure
+#| fig-height: 4.6
+plot_strip_by_group(cuhdrs_first, cuhdrs) +
+  scale_x_discrete(labels = label_groups_with_n(cuhdrs_first)) +
+  labs(x = NULL, y = "cUHDRS") +
+  theme_slides()
+```
+
+```{r}
+#| results: asis
+show_result("Median cUHDRS: ", describe_group_medians(cuhdrs_first, cuhdrs))
+```
+
+::: {.notes}
+Each participant at their first package. The grey points are participants, and the black mark is
+the median with its interquartile range. Groups smaller than the small-cell threshold are left
+out.
+:::
+
+## Is the difference just age?
+
+::: {.why}
+**Why:** age lowers cognitive scores even without HD, and the categories differ in age. Plotting
+against age shows whether a category's position is explained by how old its members are.
+:::
+
+```{r}
+#| label: cuhdrs-age-figure
+#| fig-height: 4.8
+everyone <- cuhdrs_first |>
+  select(-group)
+
+ggplot(cuhdrs_first, aes(x = age_screening, y = cuhdrs)) +
+  geom_point(data = everyone, colour = rule_colour, size = 0.6) +
+  geom_point(colour = ink_colour, size = 0.9, alpha = 0.8) +
+  facet_wrap(
+    vars(group),
+    nrow = 2,
+    labeller = as_labeller(short_group_names)
+  ) +
+  labs(x = "Age at screening, years", y = "cUHDRS") +
+  theme_slides(base_size = 15)
+```
+
+```{r}
+#| results: asis
+show_result(
+  "In controls, the Spearman correlation of cUHDRS with age is ",
+  str_glue("{format_number(control_age_rho, digits = 2)}.")
+)
+```
+
+::: {.notes}
+Each panel shows one category in black, with everyone else in grey for context. The correlation
+in controls gives the age effect without HD, which sets the baseline against which carriers are
+judged.
+:::
+
+## Does cUHDRS track expected disease burden?
+
+::: {.why}
+**Why:** the CAP score combines CAG and age into expected progression; 100 is roughly the
+expected age at motor diagnosis. If cUHDRS falls steadily with CAP in carriers, it measures the
+disease continuously, not just by category.
+:::
+
+```{r}
+#| label: cuhdrs-cap-figure
+#| fig-height: 4.6
+ggplot(cap_data, aes(x = capscore, y = cuhdrs)) +
+  geom_point(colour = ink_colour, size = 1, alpha = 0.6) +
+  geom_smooth(
+    method = "loess",
+    formula = y ~ x,
+    se = FALSE,
+    colour = accent_colour,
+    linewidth = 1
+  ) +
+  labs(x = "CAP score", y = "cUHDRS") +
+  theme_slides()
+```
+
+```{r}
+#| results: asis
+cap_rho_text <- format_number(cap_rho, digits = 2)
+show_result(
+  str_glue("Carriers: n = {format_n(nrow(cap_data))}; "),
+  str_glue("Spearman correlation with CAP {cap_rho_text}.")
+)
+```
+
+::: {.notes}
+CAP = age × (CAG − 30) / 6.49 (Warner et al.). The red line is a loess smooth. A bend in the
+smooth suggests cUHDRS changes little early and faster later, which is the pattern expected from
+natural-history studies.
+:::
+
+## Which parts drive the differences?
+
+::: {.why}
+**Why:** two groups can share a cUHDRS for different reasons. Splitting the difference from
+controls into its four parts shows whether function, motor or cognition dominates at each stage.
+:::
+
+```{r}
+#| label: cuhdrs-parts-figure
+#| fig-height: 4.6
+most_advanced_group <- last(levels(fct_drop(part_contributions$group)))
+part_labels <- part_contributions |>
+  filter(group == most_advanced_group)
+
+ggplot(part_contributions, aes(x = group, y = difference, group = part)) +
+  geom_hline(yintercept = 0, colour = rule_colour) +
+  geom_line(colour = ink_colour, linewidth = 0.6) +
+  geom_point(colour = ink_colour, size = 1.8) +
+  geom_text_repel(
+    aes(label = part),
+    data = part_labels,
+    nudge_x = 0.25,
+    hjust = 0,
+    direction = "y",
+    size = 5,
+    family = report_font,
+    colour = ink_colour,
+    segment.colour = rule_colour
+  ) +
+  scale_x_discrete(
+    labels = short_group_labels,
+    expand = expansion(add = c(0.4, 1.8))
+  ) +
+  labs(x = NULL, y = "Difference from controls,\ncUHDRS units") +
+  theme_slides()
+```
+
+```{r}
+#| results: asis
+largest_drop_texts <- str_glue(
+  "{shorten_group(largest_drop_by_group$group)} {largest_drop_by_group$part}"
+)
+show_result("Largest drop: ", join_with_dots(largest_drop_texts))
+```
+
+::: {.notes}
+Each part's term from the cUHDRS formula is averaged per category, and the control mean is
+subtracted. The four lines add up to the category's cUHDRS difference from controls. TFC has a
+ceiling at 13, so it moves only once function declines; cognition often moves earlier.
+:::
+
+## What do repeat packages show?
+
+::: {.why}
+**Why:** before planning longitudinal biomarker work, check how many participants have repeated
+measures and over what span. The change per year is a feasibility check, not an estimate of
+progression.
+:::
+
+```{r}
+#| label: cuhdrs-change-figure
+#| fig-height: 4.4
+repeated_by_first_group <- repeated_cuhdrs |>
+  mutate(group = first_group) |>
+  drop_small_groups()
+
+if (nrow(repeated_by_first_group) > 0) {
+  ggplot(
+    repeated_by_first_group,
+    aes(x = years_since_first, y = cuhdrs, group = subjid)
+  ) +
+    geom_line(colour = ink_colour, linewidth = 0.35, alpha = 0.5) +
+    geom_point(colour = ink_colour, size = 0.6) +
+    facet_wrap(
+      vars(group),
+      nrow = 2,
+      labeller = as_labeller(short_group_names)
+    ) +
+    labs(x = "Years since first sampling visit", y = "cUHDRS") +
+    theme_slides(base_size = 15)
+}
+```
+
+```{r}
+#| results: asis
+change_texts <- str_glue(
+  "{shorten_group(change_by_group$group)} ",
+  "{format_number(change_by_group$change_per_year, digits = 2)}"
+)
+follow_up_text <- format_number(median(annual_change$years), digits = 1)
+show_result(
+  str_glue("{format_n(nrow(annual_change))} participants with repeats "),
+  str_glue("(median follow-up {follow_up_text} years). "),
+  "Median change per year: ",
+  join_with_dots(change_texts)
+)
+```
+
+::: {.notes}
+Change per year is (last − first cUHDRS) divided by the years between them, per participant.
+Over one or two years measurement noise is large compared with true change, so these medians
+show feasibility only.
+:::
+
+# Biosamples
+
+## Are the CSF samples clean?
+
+::: {.why}
+**Why:** blood in CSF carries plasma proteins into the sample and can mimic or hide a CSF
+signal. Red-cell counts are the first quality check before any CSF biomarker analysis.
+:::
+
+```{r}
+#| label: csf-red-cells-figure
+#| fig-height: 4.4
+red_cells_by_group <- csf_collections |>
+  filter(!is.na(erythrocytes)) |>
+  drop_small_groups()
+
+plot_strip_by_group(red_cells_by_group, erythrocytes) +
+  scale_y_continuous(
+    transform = scales::pseudo_log_trans(sigma = 1, base = 10),
+    breaks = c(0, 10, 100, 1000, 10000),
+    labels = scales::label_comma()
+  ) +
+  scale_x_discrete(labels = label_groups_with_n(red_cells_by_group)) +
+  labs(x = NULL, y = "Red cells per µl") +
+  theme_slides()
+```
+
+```{r}
+#| results: asis
+collections <- nrow(csf_collections)
+flagged_collections <- sum(csf_collections$erythrocyte_flag, na.rm = TRUE)
+red_cells_text <- format_median_iqr(csf_collections$erythrocytes, digits = 1)
+show_result(
+  str_glue("{format_n(collections)} collections; "),
+  str_glue("median {red_cells_text} red cells per µl; "),
+  str_glue("red-cell flag on {format_count(flagged_collections, collections)}.")
+)
+```
+
+::: {.notes}
+Cells are counted three times per µl at the site within an hour of collection, and the plot
+shows the mean of the three on a pseudo-log scale. If red-cell counts differ by category,
+contamination could confound protein differences, so it is worth adjusting for or excluding
+heavily contaminated samples.
+:::
+
+## Are the Olink data fit for analysis? {visibility="`r olink_visibility`"}
+
+::: {.why}
+**Why:** before any biology, check three things: the samples link to clinical visits, Olink's
+own QC flags are rare, and enough assays are detected above the limit of detection (LOD).
+:::
+
+```{r}
+#| label: olink-overview-table
+#| eval: !expr has_olink
+olink_overview |>
+  select(
+    matrix, samples, linked, participants,
+    sample_warnings, below_lod, assays, assays_kept
+  ) |>
+  gt(rowname_col = "matrix") |>
+  cols_label(
+    samples = "Samples",
+    linked = "Linked",
+    participants = "Participants",
+    sample_warnings = "QC warnings",
+    below_lod = "Below LOD",
+    assays = "Assays",
+    assays_kept = "Assays kept"
+  ) |>
+  fmt_percent(c(sample_warnings, below_lod), decimals = 1) |>
+  fmt_number(
+    c(samples, linked, participants, assays, assays_kept),
+    decimals = 0
+  ) |>
+  style_table(font_size = 22)
+```
+
+```{r}
+#| label: olink-detection-figure
+#| eval: !expr has_olink
+#| fig-height: 3.2
+panel_detection <- detection |>
+  summarise(detected = median(detected), .by = c(matrix, panel)) |>
+  mutate(panel = fct_reorder(panel, detected, .fun = min))
+
+top_panel_labels <- panel_detection |>
+  filter(panel == last(levels(panel)))
+
+ggplot(panel_detection, aes(x = detected, y = panel)) +
+  geom_vline(
+    xintercept = settings$min_detected,
+    colour = accent_colour,
+    linewidth = 0.5
+  ) +
+  geom_line(aes(group = panel), colour = rule_colour, linewidth = 0.9) +
+  geom_point(aes(shape = matrix), colour = ink_colour, size = 2.6) +
+  geom_text(
+    aes(label = matrix),
+    data = top_panel_labels,
+    vjust = -1,
+    size = 4.2,
+    family = report_font,
+    colour = secondary_colour
+  ) +
+  scale_shape_manual(values = c(CSF = 16, Serum = 1)) +
+  scale_x_continuous(labels = scales::label_percent(), limits = c(0, 1)) +
+  # headroom above the top panel for the CSF and Serum labels
+  scale_y_discrete(expand = expansion(add = c(0.6, 1.2))) +
+  labs(x = "Median share of samples above the LOD, per panel", y = NULL) +
+  theme_slides(base_size = 14)
+```
+
+::: {.notes}
+- **Linked:** the sample's subjid and visit day match a sampling visit. The analyses use each
+  participant's earliest sample per matrix.
+- **QC warnings:** the share of sample–panel pairs that Olink flagged.
+- **Values below the LOD** are kept, as Olink advises, but assays detected in fewer than half of
+  the samples are left out of the association screens (the red line).
+- **CSF against serum:** CSF has far less protein than serum, so more CSF assays fall below the
+  LOD.
+:::
+
+## Do plates or biology drive the protein data? {visibility="`r olink_visibility`"}
+
+::: {.why}
+**Why:** if samples cluster by assay plate, plate effects could pass for disease effects. The
+main axes of variation should line up with biology (category, age), not with plates.
+:::
+
+```{r}
+#| label: pca-figure
+#| eval: !expr has_olink
+#| fig-height: 4.6
+
+# The first principal component against plate or group, one panel per
+# matrix.
+plot_first_component <- function(data, x, x_label, scales = "free_y") {
+  ggplot(data, aes(x = {{ x }}, y = pc1)) +
+    geom_jitter(
+      width = 0.15,
+      height = 0,
+      size = 0.7,
+      alpha = 0.6,
+      colour = context_colour
+    ) +
+    summarise_median_iqr(linewidth = 0.7, size = 0.35) +
+    facet_wrap(vars(matrix), ncol = 1, scales = scales) +
+    labs(x = x_label, y = "First principal component") +
+    theme_slides(base_size = 14)
+}
+
+# Plate IDs can be long, so plates are numbered within each matrix.
+first_component_by_plate <- pca_scores |>
+  mutate(plate_number = factor(dense_rank(plate)), .by = matrix) |>
+  plot_first_component(
+    plate_number,
+    "Plate, numbered in ID order",
+    scales = "free"
+  )
+
+first_component_by_group <- pca_scores |>
+  drop_small_groups() |>
+  plot_first_component(group, NULL) +
+  scale_x_discrete(labels = short_group_labels)
+
+first_component_by_plate +
+  first_component_by_group +
+  plot_layout(widths = c(1, 1.6)) &
+  theme(plot.background = element_rect(fill = paper_colour, colour = NA))
+```
+
+```{r}
+#| results: asis
+#| eval: !expr has_olink
+batch_texts <- batch_summary |>
+  mutate(across(c(plate, group, age), \(r_squared) round(r_squared, 2))) |>
+  glue::glue_data("{matrix}: plate {plate}, category {group}, age {age}")
+show_result(
+  "Largest R² over the first five components: ",
+  join_with_dots(batch_texts)
+)
+```
+
+::: {.notes}
+- **PCA:** run on the kept assays per matrix. Missing values are filled with the assay median,
+  and every assay is scaled.
+- **R²:** for each of the first five components, the share of its variance that plate, category,
+  sex or age explain in a one-factor linear model. A plate R² near zero means the normalisation
+  worked.
+- **Age:** a large age R² is common in proteomics, which is why the later models adjust for age.
+:::
+
+## Which proteins differ between carriers and controls? {visibility="`r olink_visibility`"}
+
+::: {.why}
+**Why:** the most basic biomarker question is which proteins differ with the HD gene. Carriers
+and controls differ in age and sex mix, so both are adjusted for.
+:::
+
+```{r}
+#| label: volcano-figure
+#| eval: !expr has_olink
+#| fig-height: 4.6
+volcano_data <- differential |>
+  mutate(significant = p_fdr < settings$fdr)
+
+strongest_proteins <- volcano_data |>
+  filter(significant) |>
+  slice_min(p.value, n = 8, by = matrix)
+
+ggplot(volcano_data, aes(x = estimate, y = -log10(p.value))) +
+  geom_vline(xintercept = 0, colour = rule_colour, linewidth = 0.4) +
+  geom_point(aes(colour = significant), size = 0.9, alpha = 0.8) +
+  geom_text_repel(
+    aes(label = assay),
+    data = strongest_proteins,
+    size = 4,
+    family = report_font,
+    colour = accent_colour,
+    segment.colour = rule_colour,
+    max.overlaps = 20
+  ) +
+  scale_colour_manual(
+    values = c(`FALSE` = context_colour, `TRUE` = ink_colour)
+  ) +
+  facet_wrap(vars(matrix), scales = "free") +
+  labs(
+    x = "Difference in NPX (log2), carriers minus controls",
+    y = "−log10 p"
+  ) +
+  theme_slides(base_size = 15)
+```
+
+```{r}
+#| results: asis
+#| eval: !expr has_olink
+differential_texts <- str_glue(
+  "{differential_counts$matrix}: {differential_counts$higher} higher and ",
+  "{differential_counts$lower} lower of ",
+  "{format_number(differential_counts$tested)} (FDR {settings$fdr}); ",
+  "strongest {differential_counts$strongest}"
+)
+show_result(join_with_dots(differential_texts))
+```
+
+::: {.notes}
+- **Model:** one linear model per protein, NPX ~ carrier + age + sex. Carriers are hdcat 1–5
+  with CAG ≥ 40; controls are hdcat 6; incomplete penetrance is left out.
+- **Multiple testing:** p-values are corrected per matrix with Benjamini–Hochberg. Black points
+  pass the false discovery rate.
+- **Reading the x-axis:** NPX is log2, so a difference of 1 means twice as much.
+- **Status:** this is a screen. Hits need replication, ideally with an absolute assay.
+:::
+
+## Which proteins track cUHDRS in carriers? {visibility="`r olink_visibility`"}
+
+::: {.why}
+**Why:** proteins that follow clinical severity *within* carriers are candidates for monitoring
+progression. Age drives both protein levels and cUHDRS, so the correlation is adjusted for age
+(and sex).
+:::
+
+```{r}
+#| label: cuhdrs-proteins-table
+#| eval: !expr has_olink
+cuhdrs_associations |>
+  slice_max(abs(rho), n = 8, by = matrix) |>
+  mutate(q_value = format_p(p_fdr)) |>
+  select(matrix, assay, panel, rho, q_value) |>
+  gt(groupname_col = "matrix", rowname_col = "assay") |>
+  cols_label(panel = "Panel", rho = "Partial ρ", q_value = "q (FDR)") |>
+  fmt_number(rho, decimals = 2) |>
+  style_table(font_size = 18)
+```
+
+```{r}
+#| results: asis
+#| eval: !expr has_olink
+association_texts <- str_glue(
+  "{cuhdrs_counts$matrix}: {cuhdrs_counts$passing} of ",
+  "{format_number(cuhdrs_counts$tested)} proteins pass the FDR ",
+  "({format_n(cuhdrs_counts$carriers)} carriers)"
+)
+show_result(join_with_dots(association_texts))
+```
+
+::: {.notes}
+- **Method:** partial Spearman correlation. Rank the protein, cUHDRS and age, regress the rank
+  of age and sex out of both, then correlate the residuals. Benjamini–Hochberg is applied per
+  matrix.
+- **Sign:** a negative ρ means more protein goes with a lower (worse) cUHDRS.
+- **Interpretation:** these are associations at one time point, not evidence that a protein
+  predicts decline.
+:::
+
+## Does serum reflect CSF? {visibility="`r pair_visibility`"}
+
+::: {.why}
+**Why:** blood is far easier to collect than CSF. Proteins whose serum levels follow their CSF
+levels could be measured in blood. Proteins that don't need CSF.
+:::
+
+```{r}
+#| label: csf-serum-figure
+#| eval: !expr has_both_matrices
+#| fig-height: 4.4
+positive_control_rho <- csf_serum |>
+  filter(assay == positive_control) |>
+  slice_head(n = 1)
+
+lowest_break <- floor(min(csf_serum$rho) * 4) / 4
+
+ggplot(csf_serum, aes(x = rho)) +
+  geom_histogram(
+    binwidth = 0.025,
+    boundary = 0,
+    fill = context_colour,
+    colour = paper_colour
+  ) +
+  geom_vline(
+    xintercept = positive_control_rho$rho,
+    colour = accent_colour,
+    linewidth = 0.6
+  ) +
+  annotate(
+    "text",
+    x = positive_control_rho$rho,
+    y = Inf,
+    label = positive_control,
+    vjust = 1.5,
+    hjust = -0.15,
+    family = report_font,
+    size = 4.5,
+    colour = accent_colour
+  ) +
+  scale_x_continuous(
+    breaks = seq(-1, 1, by = 0.25),
+    limits = c(lowest_break, 1)
+  ) +
+  labs(x = "CSF–serum Spearman correlation, per protein", y = "Proteins") +
+  theme_slides()
+```
+
+```{r}
+#| results: asis
+#| eval: !expr has_both_matrices
+strongly_correlated <- sum(csf_serum$rho > strong_correlation)
+show_result(
+  str_glue("{format_number(nrow(csf_serum))} proteins; median correlation "),
+  str_glue("{format_number(median(csf_serum$rho), digits = 2)}; "),
+  str_glue("{format_number(strongly_correlated)} above {strong_correlation}.")
+)
+```
+
+::: {.notes}
+For each protein kept in both matrices, the Spearman correlation is taken across participants
+with both a CSF and a serum sample, if at least 10 have both. Proteins made in the brain and
+leaking to blood (such as NfL) tend to correlate; proteins made mainly in blood often don't.
+:::
+
+## A positive check: neurofilament light {visibility="`r olink_visibility`"}
+
+::: {.why}
+**Why:** NfL is the best-established fluid marker of neurodegeneration in HD (Byrne et al.
+2017). If it does not rise across categories and fall with cUHDRS, suspect the data linkage
+before the biology.
+:::
+
+```{r}
+#| label: nefl-figure
+#| eval: !expr has_olink
+#| fig-height: 6
+nefl_carriers <- nefl |>
+  filter(carrier, !is.na(cuhdrs))
+
+if (nrow(nefl) > 0) {
+  nefl_by_group <- nefl |>
+    drop_small_groups() |>
+    plot_strip_by_group(npx) +
+    facet_wrap(vars(matrix), scales = "free_y") +
+    scale_x_discrete(labels = short_group_labels) +
+    labs(x = NULL, y = "NPX") +
+    theme_slides(base_size = 13)
+
+  nefl_by_cuhdrs <- ggplot(nefl_carriers, aes(x = cuhdrs, y = npx)) +
+    geom_point(colour = ink_colour, size = 0.8, alpha = 0.6) +
+    geom_smooth(
+      method = "loess",
+      formula = y ~ x,
+      se = FALSE,
+      colour = accent_colour,
+      linewidth = 0.8
+    ) +
+    facet_wrap(vars(matrix), scales = "free_y") +
+    labs(x = "cUHDRS (carriers)", y = "NPX") +
+    theme_slides(base_size = 13)
+
+  (nefl_by_group / nefl_by_cuhdrs) &
+    theme(plot.background = element_rect(fill = paper_colour, colour = NA))
+}
+```
+
+```{r}
+#| results: asis
+#| eval: !expr has_olink
+nefl_associations <- cuhdrs_associations |>
+  filter(assay == positive_control)
+
+if (nrow(nefl_associations) > 0) {
+  nefl_texts <- nefl_associations |>
+    mutate(rho = format_number(rho, digits = 2)) |>
+    glue::glue_data("{matrix} {rho}")
+  show_result("NEFL partial ρ with cUHDRS: ", join_with_dots(nefl_texts))
+}
+```
+
+::: {.notes}
+NEFL is Olink's assay for neurofilament light. If it is missing from the export, these plots
+stay empty. If NfL looks flat across categories on a real release, check the sample-to-visit
+linkage first.
+:::
+
+# Summary
+
+## What the first look shows
+
+```{r}
+#| results: asis
+median_red_cells <- median(csf_collections$erythrocytes, na.rm = TRUE)
+
+summary_lines <- c(
+  str_glue(
+    "- **Data:** {format_n(n_distinct(pds$profile$subjid))} participants and ",
+    "{format_n(nrow(pds$participation))} packages; ",
+    "{format_percent(single_package_share)} have one package, so the data are ",
+    "mostly cross-sectional."
+  ),
+  str_glue(
+    "- **cUHDRS:** complete for {format_n(nrow(source_visits))} packages; ",
+    "medians by category: {describe_group_medians(cuhdrs_first, cuhdrs)}."
+  ),
+  str_glue(
+    "- **Tracks burden:** Spearman correlation with CAP in carriers ",
+    "{format_number(cap_rho, digits = 2)}."
+  ),
+  str_glue(
+    "- **CSF quality:** median {format_number(median_red_cells, digits = 1)} ",
+    "red cells per µl."
+  )
+)
+
+if (has_olink) {
+  passing_differential <- str_glue(
+    "{differential_counts$matrix} ",
+    "{differential_counts$higher + differential_counts$lower}"
+  )
+  passing_cuhdrs <- str_glue("{cuhdrs_counts$matrix} {cuhdrs_counts$passing}")
+  summary_lines <- c(
+    summary_lines,
+    str_glue(
+      "- **Olink, carriers against controls:** proteins passing the FDR: ",
+      "{str_flatten_comma(passing_differential)}."
+    ),
+    str_glue(
+      "- **Olink, cUHDRS in carriers:** proteins passing the FDR: ",
+      "{str_flatten_comma(passing_cuhdrs)}."
+    )
+  )
+}
+
+cat(summary_lines, sep = "\n")
+```
+
+::: {.notes}
+Every number on this slide is computed at render time from the release the deck was built on.
+:::
+
+## Limitations
+
+- **Mostly cross-sectional.** Few participants have repeat packages, over short spans.
+- **A selected sample.** Exclusions for anticoagulants, high CRP, recent investigational drugs
+  and LP risk make HDClarity healthier than Enroll-HD overall.
+- **Category is carried forward.** hdcat is reviewed only at screenings 1 and 5, so it can lag
+  behind the current stage.
+- **Relative proteomics.** NPX compares samples within an assay, not absolute concentrations or
+  levels across assays.
+- **Screens, not tests.** Thousands of models, corrected for FDR, generate hypotheses to
+  replicate.
+
+::: {.notes}
+These limits follow from the study design and the data type; they are not specific to any one
+release.
+:::
+
+## Possible next steps
+
+- **Adjust for disease burden:** model proteins against cUHDRS with CAP or HD-ISS in the model,
+  to separate disease burden from age.
+- **Test–retest reliability:** use the repeat sampling visits (4–8 weeks apart) to measure the
+  reliability of the top proteins.
+- **Blood contamination:** run sensitivity analyses that exclude or adjust for heavily
+  contaminated CSF samples.
+- **Replicate the hits:** in the SomaScan data or with targeted assays.
+- **Plan longitudinal analyses:** as more participants accumulate repeat packages.
+
+::: {.notes}
+These are suggestions for discussion, ordered from quickest to most work.
+:::

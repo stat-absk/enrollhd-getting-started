@@ -15,3 +15,8 @@ enrollhd-getting-started.html
 
 # macOS
 .DS_Store
+
+# HDClarity first look: never commit data or a render made from data.
+# The synthetic render is kept as hdclarity_slides_synthetic.html.
+hdclarity-first-look/data
+hdclarity-first-look/hdclarity_slides.html

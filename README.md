@@ -17,6 +17,11 @@ A tutorial slide deck for statisticians who are about to open an Enroll-HD perio
 
 **View the slides:** <https://stat-absk.github.io/slides/enrollhd-getting-started.html>
 
+**Follow-on deck:** [HDClarity: a first look](hdclarity-first-look/) is a 20-minute deck on
+an HDClarity release. It covers the cohort, cUHDRS by HDClarity category, CSF quality and
+Olink proteomics, with the reason for each analysis. It was rendered on synthetic data only;
+see its README.
+
 ## Disclaimer
 
 This deck is built **only from publicly available information**: the Enroll-HD documentation
